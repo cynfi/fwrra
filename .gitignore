@@ -1,0 +1,8 @@
+node_modules/
+*.log
+.DS_Store
+.claude/settings.local.json
+
+# Uncomment if you'd rather not commit the built artifact and instead
+# have consumers run `node build.js` themselves:
+# dist/

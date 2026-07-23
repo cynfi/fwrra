@@ -1,0 +1,1650 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ASA Rule Risk Analyzer</title>
+<style>
+  @font-face { font-family: 'sys-mono'; src: local('JetBrains Mono'), local('SF Mono'), local('Consolas'); }
+  :root {
+    --bg: #10131a;
+    --panel: #171b24;
+    --panel-2: #1d2230;
+    --border: #2a2f3d;
+    --border-soft: #232836;
+    --text: #cdd2de;
+    --text-dim: #7a8194;
+    --text-bright: #eef0f5;
+    --accent: #5b8cff;
+    --c-critical: #e5484d;
+    --c-high: #f2994a;
+    --c-medium: #e0b23e;
+    --c-low: #4caf7d;
+    --c-none: #4b5160;
+    --mono: 'JetBrains Mono', 'SF Mono', 'Consolas', ui-monospace, monospace;
+    --sans: 'Inter', -apple-system, 'Segoe UI', sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  body { min-height: 100vh; }
+
+  .app { max-width: 1400px; margin: 0 auto; padding: 28px 24px 80px; }
+
+  /* ---- Header ---- */
+  .header {
+    display: flex; align-items: baseline; justify-content: space-between;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 18px; margin-bottom: 22px;
+    flex-wrap: wrap; gap: 12px;
+  }
+  .header h1 {
+    font-family: var(--mono);
+    font-size: 20px; font-weight: 600; letter-spacing: -0.02em;
+    color: var(--text-bright); margin: 0;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .header h1 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex-shrink:0; }
+  .header .sub { font-size: 12.5px; color: var(--text-dim); margin-top: 4px; font-family: var(--mono); }
+  .header-actions { display: flex; gap: 8px; align-items: center; }
+
+  button {
+    font-family: var(--sans); font-size: 13px; font-weight: 500;
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 7px 13px; cursor: pointer;
+    transition: background 0.12s, border-color 0.12s;
+  }
+  button:hover { background: #232939; border-color: #3a4152; }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #0a0d13; font-weight: 600; }
+  button.primary:hover { background: #6f9cff; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* ---- Drop zone ---- */
+  .dropzone {
+    border: 1.5px dashed var(--border);
+    border-radius: 10px;
+    padding: 56px 24px;
+    text-align: center;
+    background: var(--panel);
+    transition: border-color 0.15s, background 0.15s;
+    cursor: pointer;
+  }
+  .dropzone.drag { border-color: var(--accent); background: #161a2a; }
+  .dropzone .icon { font-family: var(--mono); font-size: 28px; color: var(--text-dim); margin-bottom: 14px; }
+  .dropzone h2 { font-size: 15px; font-weight: 600; color: var(--text-bright); margin: 0 0 6px; }
+  .dropzone p { font-size: 13px; color: var(--text-dim); margin: 0 0 16px; }
+  .dropzone input[type=file] { display: none; }
+  .dropzone .hint { font-family: var(--mono); font-size: 11.5px; color: #545b6c; margin-top: 18px; }
+
+  /* ---- File info bar ---- */
+  .file-info {
+    display: flex; align-items: center; gap: 12px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 16px; margin-bottom: 16px;
+  }
+  .file-info .file-icon {
+    font-family: var(--mono); font-size: 16px; color: var(--accent);
+    width: 30px; height: 30px; border-radius: 6px; background: rgba(91,140,255,0.1);
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .file-info .file-meta { min-width: 0; flex: 1; }
+  .file-info .file-name {
+    font-family: var(--mono); font-size: 13.5px; font-weight: 600; color: var(--text-bright);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .file-info .file-sub {
+    font-family: var(--mono); font-size: 11px; color: var(--text-dim); margin-top: 2px;
+  }
+  .file-info .file-sub .sep { margin: 0 6px; color: var(--border); }
+
+  /* ---- Summary strip ---- */
+  .summary {
+    display: grid; grid-template-columns: repeat(7, 1fr); gap: 1px;
+    background: var(--border); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden; margin-bottom: 20px;
+  }
+  .summary .cell { background: var(--panel); padding: 14px 16px; }
+  .summary .cell .n { font-family: var(--mono); font-size: 22px; font-weight: 700; color: var(--text-bright); }
+  .summary .cell .l { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 3px; }
+  .summary .cell.crit .n { color: var(--c-critical); }
+  .summary .cell.high .n { color: var(--c-high); }
+  .summary .cell.med .n { color: var(--c-medium); }
+  .summary .cell.low .n { color: var(--c-low); }
+
+  /* ---- Controls ---- */
+  .controls {
+    display: flex; gap: 10px; align-items: center; margin-bottom: 14px; flex-wrap: wrap;
+  }
+  .controls select, .controls input[type=text] {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 7px 10px; font-size: 13px; font-family: var(--sans);
+  }
+  .controls input[type=text] { flex: 1; min-width: 180px; font-family: var(--mono); }
+  .controls .spacer { flex: 1; }
+  .legend { display: flex; gap: 14px; font-size: 11.5px; color: var(--text-dim); font-family: var(--mono); }
+  .legend .item { display: flex; align-items: center; gap: 5px; }
+  .legend .sw { width: 9px; height: 9px; border-radius: 2px; }
+
+  /* ---- Table ---- */
+  .table-wrap {
+    border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+    background: var(--panel);
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  thead th {
+    text-align: left; font-family: var(--mono); font-size: 10.5px; font-weight: 600;
+    color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em;
+    padding: 10px 12px; border-bottom: 1px solid var(--border);
+    background: var(--panel-2); position: sticky; top: 0; cursor: pointer;
+    user-select: none;
+  }
+  thead th:hover { color: var(--text); }
+  thead th.sorted::after { content: ' \2193'; }
+  thead th.sorted.asc::after { content: ' \2191'; }
+
+  tbody tr.rule-row { border-bottom: 1px solid var(--border-soft); cursor: pointer; }
+  tbody tr.rule-row:hover { background: #1c2130; }
+  tbody tr.rule-row.expanded { background: #1a1f2c; }
+  tbody tr.remark-row { border-bottom: 1px solid var(--border-soft); color: var(--text-dim); font-style: italic; }
+  tbody tr.remark-row td { padding: 6px 12px; font-size: 12px; font-family: var(--mono); }
+
+  td { padding: 9px 12px; vertical-align: top; }
+  td.risk-cell { width: 90px; }
+  td.rule-number { width: 34px; color: var(--text-dim); font-size: 12px; text-align: right; }
+  .risk-bar-wrap { display: flex; align-items: center; gap: 8px; }
+  .risk-bar-track { width: 46px; height: 6px; border-radius: 3px; background: #262b38; overflow: hidden; flex-shrink: 0; }
+  .risk-bar-fill { height: 100%; border-radius: 3px; }
+  .risk-num { font-family: var(--mono); font-weight: 700; font-size: 13px; min-width: 26px; }
+  .risk-band-pill {
+    font-family: var(--mono); font-size: 10px; font-weight: 700; text-transform: uppercase;
+    padding: 2px 6px; border-radius: 4px; letter-spacing: 0.03em;
+    display: inline-block; margin-top: 3px;
+  }
+
+  td.mono { font-family: var(--mono); font-size: 12.5px; }
+  .acl-name { color: var(--text-dim); font-family: var(--mono); font-size: 11.5px; }
+  .iface-tag {
+    font-family: var(--mono); font-size: 10.5px; color: var(--text-dim);
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px;
+    padding: 1px 6px; display: inline-block;
+  }
+  .implicit-tag {
+    font-family: var(--mono); font-size: 10px; font-weight: 700; color: var(--c-critical);
+    border: 1px solid var(--c-critical); border-radius: 4px; padding: 1px 5px; margin-left: 6px;
+  }
+  .inactive-tag {
+    font-family: var(--mono); font-size: 10px; font-weight: 700; color: var(--text-dim);
+    border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; margin-left: 6px;
+    text-transform: uppercase;
+  }
+  .action-permit { color: var(--c-low); font-weight: 600; font-family: var(--mono); font-size: 11.5px; text-transform: uppercase; }
+  .action-deny { color: var(--text-dim); font-weight: 600; font-family: var(--mono); font-size: 11.5px; text-transform: uppercase; }
+
+  /* ---- Logging column ---- */
+  .log-pill {
+    font-family: var(--mono); font-size: 11px; white-space: nowrap;
+    padding: 2px 7px; border-radius: 4px; display: inline-block; cursor: default;
+  }
+  .log-pill.log-ok { color: var(--text-dim); background: var(--panel-2); border: 1px solid var(--border); }
+  .log-pill.log-flagged.log-sev-medium { color: var(--c-medium); background: rgba(224,178,62,0.1); border: 1px solid rgba(224,178,62,0.4); }
+  .log-pill.log-flagged.log-sev-high { color: var(--c-critical); background: rgba(229,72,77,0.1); border: 1px solid rgba(229,72,77,0.4); }
+
+  /* ---- Inactive rows ---- */
+  tr.rule-row.inactive-row { opacity: 0.55; }
+  tr.rule-row.inactive-row:hover { opacity: 0.8; }
+
+  /* ---- Show-inactive toggle ---- */
+  .toggle-label {
+    display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-dim);
+    cursor: pointer; user-select: none; padding: 7px 4px;
+  }
+  .toggle-label input[type=checkbox] {
+    width: 14px; height: 14px; accent-color: var(--accent); cursor: pointer;
+  }
+  .toggle-label:hover { color: var(--text); }
+
+  .expand-caret { display: inline-block; width: 12px; color: var(--text-dim); font-size: 10px; transition: transform 0.1s; }
+  .expand-caret.open { transform: rotate(90deg); }
+
+  /* ---- Detail panel (expanded row) ---- */
+  tr.detail-row td { background: #14171f; padding: 0; border-bottom: 1px solid var(--border-soft); }
+  .detail-panel { padding: 16px 20px 20px 40px; }
+  .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 14px; }
+  .detail-section h4 {
+    font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--text-dim); margin: 0 0 8px;
+  }
+  .score-explain {
+    font-family: var(--mono); font-size: 12px; line-height: 1.9; color: var(--text);
+    background: var(--panel); border: 1px solid var(--border-soft); border-radius: 6px; padding: 10px 12px;
+  }
+  .score-explain .row { display: flex; justify-content: space-between; gap: 12px; }
+  .score-explain .row .k { color: var(--text-dim); }
+  .score-explain .row.total { border-top: 1px solid var(--border-soft); margin-top: 6px; padding-top: 6px; font-weight: 700; }
+
+  .member-tree { font-family: var(--mono); font-size: 12px; }
+  .member-tree ul { list-style: none; margin: 4px 0 0; padding-left: 16px; border-left: 1px dashed var(--border); }
+  .member-tree li { padding: 3px 0; color: var(--text); }
+  .member-tree .tag { color: var(--text-dim); font-size: 10.5px; margin-right: 6px; }
+  .member-tree .flag { color: var(--c-high); font-size: 10.5px; margin-left: 6px; }
+
+  .implicit-note {
+    font-size: 12.5px; color: var(--c-critical); background: rgba(229,72,77,0.08);
+    border: 1px solid rgba(229,72,77,0.3); border-radius: 6px; padding: 10px 12px; margin-bottom: 14px;
+  }
+
+  .empty-state { text-align: center; padding: 60px 20px; color: var(--text-dim); font-size: 13px; }
+
+  footer.note {
+    margin-top: 22px; font-size: 11.5px; color: #4b5160; font-family: var(--mono); line-height: 1.7;
+  }
+
+  ::selection { background: #3a4a7a; }
+  @media (max-width: 800px) {
+    .summary { grid-template-columns: repeat(3, 1fr); }
+    .detail-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="header">
+    <div>
+      <h1><span class="dot"></span>ASA Rule Risk Analyzer</h1>
+      <div class="sub">access-list exposure scoring &middot; runs entirely in your browser, nothing uploaded</div>
+    </div>
+    <div class="header-actions" id="headerActions" style="display:none;">
+      <button id="loadNewBtn">Load different config</button>
+      <button id="exportBtn">Export CSV</button>
+    </div>
+  </div>
+
+  <div id="dropZoneContainer">
+    <div class="dropzone" id="dropzone" tabindex="0">
+      <div class="icon">&#9635;</div>
+      <h2>Drop an ASA config file, or click to browse</h2>
+      <p>Parses objects, object-groups, access-lists, and interface bindings &mdash; entirely client-side</p>
+      <button class="primary" id="browseBtn">Choose file</button>
+      <input type="file" id="fileInput" accept=".txt,.cfg,.conf,.config">
+      <div class="hint">expects a running-config or show run output from an ASA / ASAv</div>
+    </div>
+  </div>
+
+  <div id="resultsContainer" style="display:none;">
+    <div class="file-info" id="fileInfo">
+      <div class="file-icon">&#9635;</div>
+      <div class="file-meta">
+        <div class="file-name" id="fileInfoName"></div>
+        <div class="file-sub" id="fileInfoSub"></div>
+      </div>
+    </div>
+    <div class="summary" id="summary"></div>
+    <div class="controls">
+      <select id="filterBand">
+        <option value="all">All risk levels</option>
+        <option value="Critical">Critical only</option>
+        <option value="High">High only</option>
+        <option value="Medium">Medium only</option>
+        <option value="Low">Low only</option>
+        <option value="None">None (denies)</option>
+      </select>
+      <select id="filterAction">
+        <option value="all">Permit + Deny</option>
+        <option value="permit">Permit only</option>
+        <option value="deny">Deny only</option>
+      </select>
+      <select id="filterImplicit">
+        <option value="all">All rules</option>
+        <option value="implicit">Implicit permits only</option>
+        <option value="explicit">Explicit ACL rules only</option>
+      </select>
+      <select id="filterLogging">
+        <option value="all">Any logging status</option>
+        <option value="unlogged">No logging only</option>
+        <option value="logged">Logged only</option>
+      </select>
+      <label class="toggle-label" for="showInactiveToggle">
+        <input type="checkbox" id="showInactiveToggle">
+        <span>Show inactive</span>
+      </label>
+      <input type="text" id="searchBox" placeholder="filter by address, object name, port...">
+      <button id="resetOrderBtn" style="display:none;" title="Return to inside\u2192outside, then outside\u2192inside, in original ACL order">\u21BA Reset to default order</button>
+      <div class="spacer"></div>
+      <div class="legend">
+        <div class="item"><span class="sw" style="background:var(--c-critical)"></span>critical</div>
+        <div class="item"><span class="sw" style="background:var(--c-high)"></span>high</div>
+        <div class="item"><span class="sw" style="background:var(--c-medium)"></span>medium</div>
+        <div class="item"><span class="sw" style="background:var(--c-low)"></span>low</div>
+        <div class="item"><span class="sw" style="background:var(--c-none)"></span>none</div>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table id="ruleTable">
+        <thead>
+          <tr>
+            <th style="width:20px;"></th>
+            <th data-sort="ruleNumber" class="sorted" title="Position within its ACL, in original config order (includes inactive ACEs, matching 'show access-list')">#</th>
+            <th data-sort="score">Risk</th>
+            <th data-sort="action">Action</th>
+            <th data-sort="protocol">Protocol</th>
+            <th data-sort="src">Source</th>
+            <th data-sort="dst">Destination</th>
+            <th data-sort="service">Service</th>
+            <th data-sort="logging" title="Per-ACE log directive. Flagged when a permit/deny generates no syslog message on match.">Logging</th>
+            <th data-sort="iface">Interface</th>
+            <th data-sort="acl">ACL</th>
+          </tr>
+        </thead>
+        <tbody id="ruleTableBody"></tbody>
+      </table>
+    </div>
+    <footer class="note" id="footerNote"></footer>
+  </div>
+</div>
+
+<script id="engine-scripts">
+// ============================================================
+// ASA Config Parser
+// Parses: object network/service, object-group network/service/protocol,
+//         access-list extended, nameif/security-level, access-group
+// ============================================================
+
+function parseASAConfig(text) {
+  const lines = text.split('\n').map(l => l.replace(/\r$/, ''));
+
+  const objects = {};       // name -> {type:'network'|'service', kind, ...}
+  const groups = {};        // name -> {type:'network'|'service'|'protocol', members:[...]}
+  const interfaces = {};    // nameif -> {securityLevel, physical}
+  const acls = {};          // acl name -> [entries]
+  const accessGroups = [];  // {aclName, direction, interface}
+
+  let i = 0;
+  const n = lines.length;
+
+  function peekIndentedBlock(startIdx) {
+    // collect subsequent lines that start with whitespace (sub-config)
+    const block = [];
+    let j = startIdx + 1;
+    while (j < n) {
+      const l = lines[j];
+      if (/^\s+\S/.test(l)) {
+        block.push(l.trim());
+        j++;
+      } else {
+        break;
+      }
+    }
+    return { block, nextIdx: j };
+  }
+
+  while (i < n) {
+    const raw = lines[i];
+    const line = raw.trim();
+
+    if (!line || line.startsWith('!') || line.startsWith('#')) { i++; continue; }
+
+    // ---- interface / nameif / security-level ----
+    if (/^interface\s+/.test(line)) {
+      const { block, nextIdx } = peekIndentedBlock(i);
+      let nameif = null, secLevel = null, physical = line.replace(/^interface\s+/, '');
+      for (const bl of block) {
+        let m;
+        if ((m = bl.match(/^nameif\s+(\S+)/))) nameif = m[1];
+        if ((m = bl.match(/^security-level\s+(\d+)/))) secLevel = parseInt(m[1], 10);
+      }
+      if (nameif) {
+        interfaces[nameif] = { securityLevel: secLevel !== null ? secLevel : null, physical };
+      }
+      i = nextIdx;
+      continue;
+    }
+
+    // ---- object network / object service ----
+    let m;
+    if ((m = line.match(/^object\s+network\s+(\S+)/))) {
+      const name = m[1];
+      const { block, nextIdx } = peekIndentedBlock(i);
+      const obj = { type: 'network', name, kind: null };
+      for (const bl of block) {
+        let mm;
+        if ((mm = bl.match(/^host\s+(\S+)/))) { obj.kind = 'host'; obj.address = mm[1]; }
+        else if ((mm = bl.match(/^subnet\s+(\S+)\s+(\S+)/))) { obj.kind = 'subnet'; obj.address = mm[1]; obj.mask = mm[2]; }
+        else if ((mm = bl.match(/^range\s+(\S+)\s+(\S+)/))) { obj.kind = 'range'; obj.start = mm[1]; obj.end = mm[2]; }
+        else if ((mm = bl.match(/^fqdn\s+(?:v4\s+|v6\s+)?(\S+)/))) { obj.kind = 'fqdn'; obj.address = mm[1]; }
+      }
+      objects[name] = obj;
+      i = nextIdx;
+      continue;
+    }
+
+    if ((m = line.match(/^object\s+service\s+(\S+)/))) {
+      const name = m[1];
+      const { block, nextIdx } = peekIndentedBlock(i);
+      const obj = { type: 'service', name, protocol: null, srcPort: null, destPort: null };
+      for (const bl of block) {
+        let mm;
+        if ((mm = bl.match(/^service\s+(\S+)(?:\s+source\s+eq\s+(\S+))?(?:\s+destination\s+eq\s+(\S+))?/))) {
+          obj.protocol = mm[1];
+          if (mm[2]) obj.srcPort = mm[2];
+          if (mm[3]) obj.destPort = mm[3];
+        }
+      }
+      objects[name] = obj;
+      i = nextIdx;
+      continue;
+    }
+
+    // ---- object-group network/service/protocol ----
+    if ((m = line.match(/^object-group\s+network\s+(\S+)/))) {
+      const name = m[1];
+      const { block, nextIdx } = peekIndentedBlock(i);
+      const grp = { type: 'network', name, members: [] };
+      for (const bl of block) {
+        let mm;
+        if ((mm = bl.match(/^network-object\s+object\s+(\S+)/))) grp.members.push({ ref: 'object', name: mm[1] });
+        else if ((mm = bl.match(/^network-object\s+host\s+(\S+)/))) grp.members.push({ ref: 'inline', kind: 'host', address: mm[1] });
+        else if ((mm = bl.match(/^network-object\s+(\S+)\s+(\S+)/))) grp.members.push({ ref: 'inline', kind: 'subnet', address: mm[1], mask: mm[2] });
+        else if ((mm = bl.match(/^group-object\s+(\S+)/))) grp.members.push({ ref: 'group', name: mm[1] });
+      }
+      groups[name] = grp;
+      i = nextIdx;
+      continue;
+    }
+
+    if ((m = line.match(/^object-group\s+service\s+(\S+)(?:\s+(tcp|udp|tcp-udp))?/))) {
+      const name = m[1];
+      const proto = m[2] || null;
+      const { block, nextIdx } = peekIndentedBlock(i);
+      const grp = { type: 'service', name, protoHint: proto, members: [] };
+      for (const bl of block) {
+        let mm;
+        if ((mm = bl.match(/^service-object\s+object\s+(\S+)/))) grp.members.push({ ref: 'object', name: mm[1] });
+        else if ((mm = bl.match(/^service-object\s+(tcp|udp|tcp-udp)\s+(?:source\s+eq\s+(\S+)\s+)?destination\s+eq\s+(\S+)/))) {
+          grp.members.push({ ref: 'inline', protocol: mm[1], srcPort: mm[2] || null, destPort: mm[3] });
+        }
+        else if ((mm = bl.match(/^service-object\s+(tcp|udp|tcp-udp)\s+eq\s+(\S+)/))) {
+          grp.members.push({ ref: 'inline', protocol: mm[1], srcPort: null, destPort: mm[2] });
+        }
+        else if ((mm = bl.match(/^service-object\s+(\S+)$/))) {
+          grp.members.push({ ref: 'inline', protocol: mm[1], srcPort: null, destPort: null });
+        }
+        else if ((mm = bl.match(/^port-object\s+eq\s+(\S+)/))) {
+          grp.members.push({ ref: 'inline', protocol: proto || 'tcp', srcPort: null, destPort: mm[1] });
+        }
+        else if ((mm = bl.match(/^group-object\s+(\S+)/))) grp.members.push({ ref: 'group', name: mm[1] });
+      }
+      groups[name] = grp;
+      i = nextIdx;
+      continue;
+    }
+
+    if ((m = line.match(/^object-group\s+protocol\s+(\S+)/))) {
+      const name = m[1];
+      const { block, nextIdx } = peekIndentedBlock(i);
+      const grp = { type: 'protocol', name, members: [] };
+      for (const bl of block) {
+        let mm;
+        if ((mm = bl.match(/^protocol-object\s+(\S+)/))) grp.members.push({ ref: 'inline', protocol: mm[1] });
+        else if ((mm = bl.match(/^group-object\s+(\S+)/))) grp.members.push({ ref: 'group', name: mm[1] });
+      }
+      groups[name] = grp;
+      i = nextIdx;
+      continue;
+    }
+
+    if ((m = line.match(/^object-group\s+icmp-type\s+(\S+)/))) {
+      const name = m[1];
+      const { block, nextIdx } = peekIndentedBlock(i);
+      const grp = { type: 'icmp-type', name, members: [] };
+      for (const bl of block) {
+        let mm;
+        if ((mm = bl.match(/^icmp-object\s+(\S+)/))) grp.members.push({ ref: 'inline', icmpType: mm[1] });
+      }
+      groups[name] = grp;
+      i = nextIdx;
+      continue;
+    }
+
+    // ---- access-list extended (single line form) ----
+    if ((m = line.match(/^access-list\s+(\S+)\s+extended\s+(.+)$/))) {
+      const aclName = m[1];
+      const rest = m[2];
+      if (!acls[aclName]) acls[aclName] = [];
+      const entry = parseACLLine(rest);
+      entry.raw = line;
+      entry.aclName = aclName;
+      acls[aclName].push(entry);
+      i++;
+      continue;
+    }
+
+    // ---- access-list remark ----
+    if ((m = line.match(/^access-list\s+(\S+)\s+remark\s+(.*)$/))) {
+      const aclName = m[1];
+      if (!acls[aclName]) acls[aclName] = [];
+      acls[aclName].push({ remark: m[2], aclName });
+      i++;
+      continue;
+    }
+
+    // ---- access-group ----
+    if ((m = line.match(/^access-group\s+(\S+)\s+(in|out)\s+interface\s+(\S+)/))) {
+      accessGroups.push({ aclName: m[1], direction: m[2], interface: m[3] });
+      i++;
+      continue;
+    }
+
+    i++;
+  }
+
+  return { objects, groups, interfaces, acls, accessGroups };
+}
+
+// Parses the remainder of an "access-list ... extended ..." line
+function parseACLLine(rest) {
+  const tokens = tokenize(rest);
+  let idx = 0;
+  const entry = { action: null, protocol: null, src: null, dst: null, service: null, logSetting: null, logInterval: null, disabled: false, inactive: false };
+
+  entry.action = tokens[idx++]; // permit / deny
+
+  // protocol: could be a keyword (tcp/udp/icmp/ip/esp/gre...), "object <name>", or "object-group <name>"
+  if (tokens[idx] === 'object') {
+    entry.protocol = { ref: 'object', name: tokens[idx + 1] };
+    idx += 2;
+  } else if (tokens[idx] === 'object-group') {
+    entry.protocol = { ref: 'group', name: tokens[idx + 1] };
+    idx += 2;
+  } else {
+    entry.protocol = { ref: 'literal', name: tokens[idx] };
+    idx += 1;
+  }
+
+  // source
+  const srcResult = parseEndpoint(tokens, idx);
+  entry.src = srcResult.endpoint;
+  idx = srcResult.nextIdx;
+
+  // source port (eq/range/lt/gt), only meaningful for tcp/udp literal protocols
+  const srcPortResult = parsePortSpec(tokens, idx);
+  if (srcPortResult) { entry.srcPort = srcPortResult.spec; idx = srcPortResult.nextIdx; }
+
+  // destination
+  const dstResult = parseEndpoint(tokens, idx);
+  entry.dst = dstResult.endpoint;
+  idx = dstResult.nextIdx;
+
+  // destination port / service object-group / icmp type
+  if (tokens[idx] === 'object-group' ) {
+    entry.service = { ref: 'group', name: tokens[idx + 1] };
+    idx += 2;
+  } else if (tokens[idx] === 'object') {
+    entry.service = { ref: 'object', name: tokens[idx + 1] };
+    idx += 2;
+  } else {
+    const dstPortResult = parsePortSpec(tokens, idx);
+    if (dstPortResult) { entry.destPort = dstPortResult.spec; idx = dstPortResult.nextIdx; }
+    else if (tokens[idx] && /^(echo|echo-reply|unreachable|time-exceeded|traceroute)/.test(tokens[idx])) {
+      entry.icmpType = tokens[idx];
+      idx++;
+    }
+  }
+
+  // trailing flags
+  // ASA syntax: log [level] [interval secs]  |  log disable  |  log default
+  //   bare "log"        -> level defaults to 6 (informational)
+  //   "log disable"      -> logging explicitly turned off for this ACE
+  //   "log default"      -> reverts to the ASA's default logging behavior (treated as no per-ACE log)
+  //   "log <0-7>"        -> explicit numeric level
+  while (idx < tokens.length) {
+    if (tokens[idx] === 'log') {
+      idx++;
+      if (tokens[idx] === 'disable') {
+        entry.logSetting = { mode: 'disabled' };
+        idx++;
+      } else if (tokens[idx] === 'default') {
+        entry.logSetting = { mode: 'default-behavior' };
+        idx++;
+      } else if (tokens[idx] && /^[0-7]$/.test(tokens[idx])) {
+        entry.logSetting = { mode: 'level', level: parseInt(tokens[idx], 10) };
+        idx++;
+      } else {
+        entry.logSetting = { mode: 'level', level: 6 }; // bare "log" = informational
+      }
+      // optional trailing "interval <seconds>"
+      if (tokens[idx] === 'interval' && tokens[idx + 1]) {
+        entry.logInterval = parseInt(tokens[idx + 1], 10);
+        idx += 2;
+      }
+    }
+    else if (tokens[idx] === 'disable') { entry.disabled = true; idx++; }
+    else if (tokens[idx] === 'inactive') { entry.inactive = true; idx++; }
+    else idx++;
+  }
+
+  return entry;
+}
+
+function tokenize(s) {
+  return s.trim().split(/\s+/);
+}
+
+function parseEndpoint(tokens, idx) {
+  const t = tokens[idx];
+  if (t === 'any' || t === 'any4' || t === 'any6') {
+    return { endpoint: { kind: 'any' }, nextIdx: idx + 1 };
+  }
+  if (t === 'host') {
+    return { endpoint: { kind: 'host', address: tokens[idx + 1] }, nextIdx: idx + 2 };
+  }
+  if (t === 'object-group') {
+    return { endpoint: { kind: 'group', name: tokens[idx + 1] }, nextIdx: idx + 2 };
+  }
+  if (t === 'object') {
+    return { endpoint: { kind: 'object', name: tokens[idx + 1] }, nextIdx: idx + 2 };
+  }
+  // otherwise assume "IP MASK" subnet form
+  if (t && /^\d+\.\d+\.\d+\.\d+$/.test(t) && tokens[idx + 1] && /^\d+\.\d+\.\d+\.\d+$/.test(tokens[idx + 1])) {
+    return { endpoint: { kind: 'subnet', address: t, mask: tokens[idx + 1] }, nextIdx: idx + 2 };
+  }
+  // fallback: treat single token as a bare host/fqdn
+  return { endpoint: { kind: 'literal', address: t }, nextIdx: idx + 1 };
+}
+
+function parsePortSpec(tokens, idx) {
+  const t = tokens[idx];
+  if (t === 'eq') return { spec: { op: 'eq', port: tokens[idx + 1] }, nextIdx: idx + 2 };
+  if (t === 'range') return { spec: { op: 'range', start: tokens[idx + 1], end: tokens[idx + 2] }, nextIdx: idx + 3 };
+  if (t === 'lt') return { spec: { op: 'lt', port: tokens[idx + 1] }, nextIdx: idx + 2 };
+  if (t === 'gt') return { spec: { op: 'gt', port: tokens[idx + 1] }, nextIdx: idx + 2 };
+  if (t === 'neq') return { spec: { op: 'neq', port: tokens[idx + 1] }, nextIdx: idx + 2 };
+  return null;
+}
+
+
+// ============================================================
+// Risk Scoring Engine
+// ============================================================
+
+// Well-known risky ports/protocols -> risk value (0-100)
+// Tunable table. Keyed by "protocol/port" or protocol name for whole-protocol risk.
+const SERVICE_RISK_TABLE = {
+  // File transfer / exfiltration
+  'tcp/21': { name: 'FTP', score: 55, note: 'Clear-text file transfer / exfil path' },
+  'tcp/20': { name: 'FTP-DATA', score: 55, note: 'Clear-text file transfer / exfil path' },
+  'udp/69': { name: 'TFTP', score: 55, note: 'Unauthenticated file transfer' },
+  'tcp/22': { name: 'SSH', score: 50, note: 'Remote shell / tunneling / SCP-SFTP exfil' },
+  'tcp/23': { name: 'Telnet', score: 60, note: 'Clear-text remote shell' },
+  'tcp/445': { name: 'SMB', score: 55, note: 'File share / lateral movement / worm vector' },
+  'tcp/139': { name: 'NetBIOS-SSN', score: 50, note: 'Legacy file share / lateral movement' },
+  'udp/137': { name: 'NetBIOS-NS', score: 35, note: 'NetBIOS name service' },
+  'udp/138': { name: 'NetBIOS-DGM', score: 35, note: 'NetBIOS datagram service' },
+  'tcp/3389': { name: 'RDP', score: 50, note: 'Remote desktop / common ransomware entry vector' },
+  'tcp/5900': { name: 'VNC', score: 45, note: 'Remote desktop' },
+  'tcp/135': { name: 'MS-RPC', score: 45, note: 'Windows RPC endpoint mapper' },
+  'tcp/1433': { name: 'MS-SQL', score: 35, note: 'Database access' },
+  'tcp/3306': { name: 'MySQL', score: 35, note: 'Database access' },
+  'tcp/5432': { name: 'PostgreSQL', score: 35, note: 'Database access' },
+  'tcp/25': { name: 'SMTP', score: 25, note: 'Mail relay - potential exfil/spam vector' },
+  'tcp/53': { name: 'DNS-TCP', score: 25, note: 'DNS tunneling potential' },
+  'udp/53': { name: 'DNS', score: 20, note: 'DNS tunneling potential' },
+  'tcp/6667': { name: 'IRC', score: 40, note: 'Common C2 channel' },
+  'tcp/4444': { name: 'Metasploit-default', score: 60, note: 'Common malware/C2 default port' },
+  'tcp/443': { name: 'HTTPS', score: 10, note: 'Encrypted - low visibility but broadly expected' },
+  'tcp/80': { name: 'HTTP', score: 10, note: 'Web traffic' },
+};
+
+const PROTOCOL_WHOLE_RISK = {
+  'ip': { name: 'IP (any protocol)', score: 70, note: 'All protocols permitted' },
+  'gre': { name: 'GRE', score: 30, note: 'Tunneling protocol' },
+  'esp': { name: 'ESP', score: 15, note: 'IPsec ESP - encrypted' },
+  'ah': { name: 'AH', score: 15, note: 'IPsec AH' },
+};
+
+const DEFAULT_SERVICE_RISK = 15; // baseline for an explicit, otherwise-unlisted single port
+const ANY_PORT_SERVICE_RISK = 65; // protocol specified but no port restriction (e.g. "permit tcp host A host B")
+
+function serviceKey(protocol, port) {
+  return `${protocol}/${port}`;
+}
+
+// Look up risk for a single resolved (protocol, destPort) pair
+function lookupServiceRisk(protocol, destPort) {
+  if (!protocol) return { score: DEFAULT_SERVICE_RISK, name: 'unknown', note: '' };
+  const p = protocol.toLowerCase();
+  if (destPort) {
+    const key = serviceKey(p, destPort);
+    if (SERVICE_RISK_TABLE[key]) return SERVICE_RISK_TABLE[key];
+    return { score: DEFAULT_SERVICE_RISK, name: `${p}/${destPort}`, note: 'Not in risky-service table' };
+  }
+  if (PROTOCOL_WHOLE_RISK[p]) return PROTOCOL_WHOLE_RISK[p];
+  // protocol given, no port restriction at all (tcp/udp with no eq) => any port on that protocol
+  if (p === 'tcp' || p === 'udp' || p === 'tcp-udp') {
+    return { score: ANY_PORT_SERVICE_RISK, name: `${p} (any port)`, note: 'No port restriction on this protocol' };
+  }
+  return { score: DEFAULT_SERVICE_RISK, name: p, note: '' };
+}
+
+// --- Address scope classification ---
+// scope: 'any' | 'host' | 'subnet' | 'group'(resolved to worst-case) 
+function classifyEndpointScope(resolvedEndpoint) {
+  // resolvedEndpoint: { kind: 'any' } | { kind:'host', address } | { kind:'subnet', address, mask, prefixLen } | {kind:'range',...} | {kind:'group', members:[resolved...]}
+  if (!resolvedEndpoint) return { kind: 'unknown', prefixLen: null };
+  if (resolvedEndpoint.kind === 'any') return { kind: 'any', prefixLen: 0 };
+  if (resolvedEndpoint.kind === 'host') return { kind: 'host', prefixLen: 32 };
+  if (resolvedEndpoint.kind === 'subnet') return { kind: 'subnet', prefixLen: resolvedEndpoint.prefixLen };
+  if (resolvedEndpoint.kind === 'range') return { kind: 'range', prefixLen: null };
+  if (resolvedEndpoint.kind === 'fqdn' || resolvedEndpoint.kind === 'literal') return { kind: 'host', prefixLen: 32 };
+  if (resolvedEndpoint.kind === 'group') {
+    // worst case = broadest member (lowest prefixLen / any present)
+    let worst = { kind: 'host', prefixLen: 32 };
+    for (const mem of resolvedEndpoint.members) {
+      const c = classifyEndpointScope(mem);
+      if (c.kind === 'any') return { kind: 'any', prefixLen: 0 };
+      if (c.prefixLen !== null && (worst.prefixLen === null || c.prefixLen < worst.prefixLen)) worst = c;
+    }
+    return { kind: worst.kind === 'host' && resolvedEndpoint.members.length > 1 ? 'group-multi-host' : worst.kind, prefixLen: worst.prefixLen };
+  }
+  return { kind: 'unknown', prefixLen: null };
+}
+
+function maskToPrefixLen(mask) {
+  const parts = mask.split('.').map(Number);
+  if (parts.length !== 4 || parts.some(isNaN)) return null;
+  let bits = 0;
+  for (const p of parts) {
+    bits += (p >>> 0).toString(2).split('1').length - 1;
+  }
+  return bits;
+}
+
+// Exposure base score from src/dst scope classification + port breadth
+// srcScope/dstScope: {kind, prefixLen}
+// anyPortBothDirections: bool - true if the rule permits any port/proto (bidirectional concept doesn't
+//   really apply to a single stateless ACL entry, so we treat "any port" as the bidirectional-equivalent case)
+function computeExposureScore(srcScope, dstScope, isAnyPort) {
+  const kinds = [srcScope.kind, dstScope.kind];
+
+  // any <-> any
+  if (kinds.includes('any') && kinds.filter(k => k === 'any').length === 2) {
+    return { score: 100, label: 'any \u2194 any' };
+  }
+  // any <-> host
+  if (kinds.includes('any') && kinds.includes('host')) {
+    return { score: isAnyPort ? 85 : 75, label: 'any \u2194 host' };
+  }
+  // any <-> subnet (scale by prefix length of the subnet side)
+  if (kinds.includes('any') && (kinds.includes('subnet') || kinds.includes('group-multi-host'))) {
+    const subnetSide = srcScope.kind === 'subnet' || srcScope.kind === 'group-multi-host' ? srcScope : dstScope;
+    const pfx = subnetSide.prefixLen;
+    // smaller prefix (bigger network) = closer to "any"; larger prefix = closer to "host"
+    let base;
+    if (pfx === null) base = 70;
+    else if (pfx <= 8) base = 95;
+    else if (pfx <= 16) base = 88;
+    else if (pfx <= 23) base = 80;
+    else if (pfx <= 28) base = 65;
+    else base = 55;
+    return { score: isAnyPort ? Math.min(100, base + 8) : base, label: `any \u2194 subnet/${pfx ?? '?'}` };
+  }
+  // host <-> large subnet (prefix <= 23)
+  if (kinds.includes('host') && (kinds.includes('subnet') || kinds.includes('group-multi-host'))) {
+    const subnetSide = srcScope.kind === 'subnet' || srcScope.kind === 'group-multi-host' ? srcScope : dstScope;
+    const pfx = subnetSide.prefixLen;
+    let base;
+    if (pfx === null) base = 45;
+    else if (pfx <= 16) base = 60;
+    else if (pfx <= 23) base = 50;
+    else if (pfx <= 28) base = 32;
+    else base = 25;
+    return { score: isAnyPort ? Math.min(100, base + 15) : base, label: `host \u2194 subnet/${pfx ?? '?'}` };
+  }
+  // subnet <-> subnet
+  if (kinds.includes('subnet') || kinds.includes('group-multi-host')) {
+    const p1 = srcScope.prefixLen ?? 24, p2 = dstScope.prefixLen ?? 24;
+    const minPfx = Math.min(p1, p2);
+    let base;
+    if (minPfx <= 8) base = 90;
+    else if (minPfx <= 16) base = 78;
+    else if (minPfx <= 23) base = 65;
+    else base = 45;
+    return { score: isAnyPort ? Math.min(100, base + 10) : base, label: 'subnet \u2194 subnet' };
+  }
+  // host <-> host
+  if (kinds[0] === 'host' && kinds[1] === 'host') {
+    return { score: isAnyPort ? 50 : 20, label: isAnyPort ? 'host \u2194 host (any port)' : 'host \u2194 host' };
+  }
+
+  return { score: 40, label: 'unclassified scope' };
+}
+
+// Combine exposure + service risk per the agreed algorithm:
+//   max(exposure, service) + small flat bonus if BOTH are elevated, capped at 100
+const ELEVATED_THRESHOLD = 55;
+const BOTH_ELEVATED_BONUS = 10;
+
+function combineRisk(exposureScore, serviceScore) {
+  let combined = Math.max(exposureScore, serviceScore);
+  let bonusApplied = false;
+  if (exposureScore >= ELEVATED_THRESHOLD && serviceScore >= ELEVATED_THRESHOLD) {
+    combined += BOTH_ELEVATED_BONUS;
+    bonusApplied = true;
+  }
+  combined = Math.min(100, combined);
+  return { combined, bonusApplied };
+}
+
+function riskBand(score) {
+  if (score >= 80) return { label: 'Critical', color: '#ef4444' };
+  if (score >= 60) return { label: 'High', color: '#f97316' };
+  if (score >= 35) return { label: 'Medium', color: '#eab308' };
+  if (score >= 1) return { label: 'Low', color: '#22c55e' };
+  return { label: 'None', color: '#4b5563' };
+}
+
+// ---- Logging classification ----
+const SYSLOG_LEVEL_NAMES = {
+  0: 'Emergency', 1: 'Alert', 2: 'Critical', 3: 'Error',
+  4: 'Warning', 5: 'Notification', 6: 'Informational', 7: 'Debugging',
+};
+
+// Classifies an ACE's logging configuration for display + flagging.
+// Returns { flagged, label, detail } where `flagged` means "no effective per-hit logging".
+function classifyLogging(entry) {
+  const setting = entry.logSetting;
+  const isDeny = entry.action === 'deny';
+
+  if (!setting) {
+    return {
+      flagged: true,
+      severity: isDeny ? 'high' : 'medium',
+      label: 'No logging',
+      detail: isDeny
+        ? 'No log keyword — denied traffic (possible recon/attack attempts) will not generate a per-hit syslog message.'
+        : 'No log keyword — this permit generates no per-hit syslog message.',
+    };
+  }
+  if (setting.mode === 'disabled') {
+    return {
+      flagged: true,
+      severity: isDeny ? 'high' : 'medium',
+      label: 'Logging disabled',
+      detail: `'log disable' explicitly suppresses syslog messages for this ACE${isDeny ? ' — denied traffic will be silent' : ''}.`,
+    };
+  }
+  if (setting.mode === 'default-behavior') {
+    return {
+      flagged: true,
+      severity: isDeny ? 'high' : 'medium',
+      label: 'Logging disabled',
+      detail: `'log default' reverts to the ASA's built-in logging behavior for this ACE, which does not include a per-hit message${isDeny ? ' — denied traffic will be silent' : ''}.`,
+    };
+  }
+  // mode === 'level'
+  const name = SYSLOG_LEVEL_NAMES[setting.level] ?? 'Unknown';
+  const isBareDefaultLog = setting.level === 6;
+  return {
+    flagged: false,
+    severity: 'none',
+    label: isBareDefaultLog ? `Default (6 – ${name})` : `${setting.level} – ${name}`,
+    detail: isBareDefaultLog
+      ? "Bare 'log' keyword — ASA defaults to level 6 (Informational)."
+      : `Explicit log level ${setting.level} (${name}).`,
+  };
+}
+
+
+// ============================================================
+// Resolver: turns parsed config into fully-resolved, scored rules
+// ============================================================
+
+function resolveNetworkRef(config, kind, name, seen) {
+  seen = seen || new Set();
+  if (seen.has(name)) return { kind: 'host', address: name, cyclic: true };
+  seen.add(name);
+
+  if (kind === 'object') {
+    const obj = config.objects[name];
+    if (!obj) return { kind: 'literal', address: name, unresolved: true };
+    if (obj.kind === 'subnet') return { kind: 'subnet', address: obj.address, mask: obj.mask, prefixLen: maskToPrefixLen(obj.mask), name };
+    if (obj.kind === 'host') return { kind: 'host', address: obj.address, name };
+    if (obj.kind === 'range') return { kind: 'range', start: obj.start, end: obj.end, name };
+    if (obj.kind === 'fqdn') return { kind: 'fqdn', address: obj.address, name };
+    return { kind: 'literal', address: name };
+  }
+  if (kind === 'group') {
+    const grp = config.groups[name];
+    if (!grp) return { kind: 'literal', address: name, unresolved: true };
+    const members = grp.members.map(mem => {
+      if (mem.ref === 'object') return resolveNetworkRef(config, 'object', mem.name, seen);
+      if (mem.ref === 'group') return resolveNetworkRef(config, 'group', mem.name, seen);
+      if (mem.ref === 'inline') {
+        if (mem.kind === 'host') return { kind: 'host', address: mem.address };
+        if (mem.kind === 'subnet') return { kind: 'subnet', address: mem.address, mask: mem.mask, prefixLen: maskToPrefixLen(mem.mask) };
+      }
+      return { kind: 'literal', address: '?' };
+    });
+    return { kind: 'group', name, members };
+  }
+  return { kind: 'literal', address: name };
+}
+
+function resolveEndpoint(config, endpoint) {
+  if (!endpoint) return { kind: 'unknown' };
+  if (endpoint.kind === 'any') return { kind: 'any' };
+  if (endpoint.kind === 'host') return { kind: 'host', address: endpoint.address };
+  if (endpoint.kind === 'subnet') return { kind: 'subnet', address: endpoint.address, mask: endpoint.mask, prefixLen: maskToPrefixLen(endpoint.mask) };
+  if (endpoint.kind === 'object') return resolveNetworkRef(config, 'object', endpoint.name);
+  if (endpoint.kind === 'group') return resolveNetworkRef(config, 'group', endpoint.name);
+  if (endpoint.kind === 'literal') return { kind: 'literal', address: endpoint.address };
+  return { kind: 'unknown' };
+}
+
+// Resolve a service reference (object / object-group) down to a flat list of {protocol, destPort}
+function resolveServiceRef(config, ref, seen) {
+  seen = seen || new Set();
+  if (!ref) return [];
+  if (ref.ref === 'object') {
+    if (seen.has('obj:' + ref.name)) return [];
+    seen.add('obj:' + ref.name);
+    const obj = config.objects[ref.name];
+    if (!obj) return [{ protocol: 'tcp', destPort: null, unresolved: true, name: ref.name }];
+    return [{ protocol: obj.protocol, destPort: obj.destPort, srcPort: obj.srcPort, name: ref.name }];
+  }
+  if (ref.ref === 'group') {
+    if (seen.has('grp:' + ref.name)) return [];
+    seen.add('grp:' + ref.name);
+    const grp = config.groups[ref.name];
+    if (!grp) return [{ protocol: 'tcp', destPort: null, unresolved: true, name: ref.name }];
+    let results = [];
+    for (const mem of grp.members) {
+      if (mem.ref === 'object') results = results.concat(resolveServiceRef(config, { ref: 'object', name: mem.name }, seen));
+      else if (mem.ref === 'group') results = results.concat(resolveServiceRef(config, { ref: 'group', name: mem.name }, seen));
+      else if (mem.ref === 'inline') results.push({ protocol: mem.protocol, destPort: mem.destPort, srcPort: mem.srcPort });
+    }
+    return results;
+  }
+  return [];
+}
+
+// Resolve the protocol field of an ACL entry (literal / object / object-group protocol type)
+function resolveProtocolRef(config, protoRef, seen) {
+  seen = seen || new Set();
+  if (!protoRef) return ['ip'];
+  if (protoRef.ref === 'literal') return [protoRef.name];
+  if (protoRef.ref === 'object') {
+    const obj = config.objects[protoRef.name];
+    return obj && obj.protocol ? [obj.protocol] : ['ip'];
+  }
+  if (protoRef.ref === 'group') {
+    if (seen.has(protoRef.name)) return [];
+    seen.add(protoRef.name);
+    const grp = config.groups[protoRef.name];
+    if (!grp) return ['ip'];
+    let protos = [];
+    for (const mem of grp.members) {
+      if (mem.ref === 'inline') protos.push(mem.protocol);
+      else if (mem.ref === 'group') protos = protos.concat(resolveProtocolRef(config, { ref: 'group', name: mem.name }, seen));
+    }
+    return protos.length ? protos : ['ip'];
+  }
+  return ['ip'];
+}
+
+// Build a flat list of {protocol, destPort} service combos for a rule, given
+// the ACL entry's protocol field, srcPort/destPort (literal eq), and service ref.
+function resolveRuleServices(config, entry) {
+  // Case 1: destination service object/object-group specified (entry.service)
+  if (entry.service) {
+    const svcList = resolveServiceRef(config, entry.service);
+    if (svcList.length) return svcList.map(s => ({ protocol: s.protocol || 'tcp', destPort: s.destPort }));
+  }
+  // Case 2: protocol field itself is object/object-group (protocol object-group, e.g. TCPUDP)
+  const protocols = resolveProtocolRef(config, entry.protocol);
+  const destPortSpec = entry.destPort; // {op, port} | {op:'range', start, end}
+  const combos = [];
+  for (const proto of protocols) {
+    if (destPortSpec) {
+      if (destPortSpec.op === 'eq') combos.push({ protocol: proto, destPort: destPortSpec.port });
+      else if (destPortSpec.op === 'range') combos.push({ protocol: proto, destPort: destPortSpec.start, destPortEnd: destPortSpec.end, isRange: true });
+      else combos.push({ protocol: proto, destPort: null });
+    } else {
+      combos.push({ protocol: proto, destPort: null });
+    }
+  }
+  return combos.length ? combos : [{ protocol: 'ip', destPort: null }];
+}
+
+function scopeContainsMultipleHosts(resolvedEndpoint) {
+  if (resolvedEndpoint.kind !== 'group') return false;
+  return resolvedEndpoint.members.length > 1;
+}
+
+// Compute risk for a single ACL entry
+function scoreEntry(config, entry) {
+  if (entry.remark) return null; // remarks aren't scored
+  const logging = classifyLogging(entry);
+  if (entry.action !== 'permit') {
+    return {
+      action: entry.action,
+      score: 0,
+      band: riskBand(0),
+      exposure: { score: 0, label: 'deny' },
+      service: { score: 0, name: 'n/a' },
+      bonusApplied: false,
+      services: [],
+      logging,
+    };
+  }
+
+  const srcResolved = resolveEndpoint(config, entry.src);
+  const dstResolved = resolveEndpoint(config, entry.dst);
+  const srcScope = classifyEndpointScope(srcResolved);
+  const dstScope = classifyEndpointScope(dstResolved);
+
+  const serviceCombos = resolveRuleServices(config, entry);
+  // "any port" if any resolved combo has no destPort restriction, or protocol is bare ip/gre/esp etc with no port concept
+  const isAnyPort = serviceCombos.some(c => !c.destPort);
+
+  const exposure = computeExposureScore(srcScope, dstScope, isAnyPort);
+
+  // worst-case service risk across all resolved protocol/port combos
+  let worstService = { score: 0, name: 'n/a', note: '' };
+  for (const combo of serviceCombos) {
+    const r = lookupServiceRisk(combo.protocol, combo.destPort);
+    if (r.score > worstService.score) worstService = r;
+  }
+
+  const { combined, bonusApplied } = combineRisk(exposure.score, worstService.score);
+
+  return {
+    action: entry.action,
+    score: combined,
+    band: riskBand(combined),
+    exposure,
+    service: worstService,
+    bonusApplied,
+    services: serviceCombos,
+    srcResolved,
+    dstResolved,
+    srcScope,
+    dstScope,
+    logging,
+  };
+}
+
+// Build the full list of rules-to-display: real ACL entries (on applied ACLs only)
+// plus synthesized implicit-permit entries for unprotected higher->lower security interface pairs.
+// Default-order sort key for an applied ACL's interface: most-secure interface first,
+// then least-secure. Interfaces with equal security level are tie-broken by name (lowest first).
+function interfaceOrderKey(config, ifName) {
+  const iface = config.interfaces[ifName];
+  const level = iface && iface.securityLevel !== null ? iface.securityLevel : -1;
+  return { level, name: ifName };
+}
+
+function buildRuleset(config) {
+  const rows = [];
+
+  // Determine which ACLs are actually applied, and to which interface/direction
+  const appliedAcls = new Set(config.accessGroups.map(ag => ag.aclName));
+  const aclApplication = {}; // aclName -> [{interface, direction}]
+  for (const ag of config.accessGroups) {
+    if (!aclApplication[ag.aclName]) aclApplication[ag.aclName] = [];
+    aclApplication[ag.aclName].push({ interface: ag.interface, direction: ag.direction });
+  }
+
+  let ruleId = 0;
+  for (const aclName of Object.keys(config.acls)) {
+    if (!appliedAcls.has(aclName)) continue; // exclude ACLs not bound to any interface
+
+    const applications = aclApplication[aclName];
+
+    // Per-ACL sequence number, restarting at 1 for each ACL, in original config order.
+    // Inactive ACEs still consume a number (matching "show access-list" / ASDM), so the
+    // numbering doesn't shift depending on whether inactive rules are currently shown.
+    let seq = 0;
+
+    for (const entry of config.acls[aclName]) {
+      if (entry.remark) {
+        rows.push({ id: ruleId++, type: 'remark', aclName, text: entry.remark });
+        continue;
+      }
+
+      seq += 1;
+      const ruleNumber = seq;
+      const scored = scoreEntry(config, entry);
+      for (const app of applications) {
+        const orderKey = interfaceOrderKey(config, app.interface);
+        rows.push({
+          id: ruleId++,
+          type: 'rule',
+          aclName,
+          ruleNumber,
+          entry,
+          scored,
+          interface: app.interface,
+          direction: app.direction,
+          implicit: false,
+          inactive: !!entry.inactive,
+          defaultOrder: { level: orderKey.level, ifName: orderKey.name, ruleNumber },
+        });
+      }
+    }
+  }
+
+  // Synthesize implicit permit any/any for unprotected higher->lower security-level pairs
+  const ifNames = Object.keys(config.interfaces).filter(nm => config.interfaces[nm].securityLevel !== null);
+  const protectedInbound = new Set(); // interfaces that have an inbound ACL applied
+  for (const ag of config.accessGroups) {
+    if (ag.direction === 'in') protectedInbound.add(ag.interface);
+  }
+
+  for (const highIf of ifNames) {
+    const highLevel = config.interfaces[highIf].securityLevel;
+    for (const lowIf of ifNames) {
+      if (highIf === lowIf) continue;
+      const lowLevel = config.interfaces[lowIf].securityLevel;
+      if (highLevel <= lowLevel) continue; // only higher -> lower is implicitly permitted
+      // Traffic flows from highIf (ingress on high side) to lowIf. It is blocked only if
+      // highIf has an inbound ACL applied (which would replace the implicit permit with explicit rules).
+      if (protectedInbound.has(highIf)) continue;
+      const scored = {
+        action: 'permit',
+        score: 100,
+        band: riskBand(100),
+        exposure: { score: 100, label: 'any \u2194 any (implicit)' },
+        service: { score: 0, name: 'any' },
+        bonusApplied: false,
+        services: [{ protocol: 'ip', destPort: null }],
+        srcResolved: { kind: 'any' },
+        dstResolved: { kind: 'any' },
+        srcScope: { kind: 'any' },
+        dstScope: { kind: 'any' },
+        logging: {
+          flagged: true,
+          severity: 'high',
+          label: 'No logging',
+          detail: 'Implicit permit \u2014 there is no ACE to attach a log directive to, so this traffic is never logged.',
+        },
+      };
+      const highOrder = interfaceOrderKey(config, highIf);
+      rows.push({
+        id: ruleId++,
+        type: 'rule',
+        aclName: null,
+        ruleNumber: null,
+        entry: { action: 'permit', protocol: { ref: 'literal', name: 'ip' }, src: { kind: 'any' }, dst: { kind: 'any' } },
+        scored,
+        interface: `${highIf} \u2192 ${lowIf}`,
+        direction: 'implicit',
+        implicit: true,
+        implicitNote: `No inbound ACL on '${highIf}' (level ${highLevel}) \u2014 default ASA behavior implicitly permits all traffic to '${lowIf}' (level ${lowLevel}).`,
+        // Implicit rules sort after all explicit rules for their source interface, grouped by that interface's security order.
+        defaultOrder: { level: highOrder.level, ifName: highOrder.name, ruleNumber: Infinity },
+      });
+    }
+  }
+
+  return rows;
+}
+
+</script>
+<script id="ui-script">
+(function () {
+  let CONFIG = null;
+  let ROWS = [];
+  let EXPANDED = new Set();
+  let sortKey = 'default';
+  let sortDir = 'asc';
+  let showInactive = false;
+
+  const dropzone = document.getElementById('dropzone');
+  const fileInput = document.getElementById('fileInput');
+  const browseBtn = document.getElementById('browseBtn');
+  const dropZoneContainer = document.getElementById('dropZoneContainer');
+  const resultsContainer = document.getElementById('resultsContainer');
+  const headerActions = document.getElementById('headerActions');
+  const loadNewBtn = document.getElementById('loadNewBtn');
+  const exportBtn = document.getElementById('exportBtn');
+  const tbody = document.getElementById('ruleTableBody');
+  const summaryEl = document.getElementById('summary');
+  const filterBand = document.getElementById('filterBand');
+  const filterAction = document.getElementById('filterAction');
+  const filterImplicit = document.getElementById('filterImplicit');
+  const filterLogging = document.getElementById('filterLogging');
+  const showInactiveToggle = document.getElementById('showInactiveToggle');
+  const searchBox = document.getElementById('searchBox');
+  const footerNote = document.getElementById('footerNote');
+  const fileInfoName = document.getElementById('fileInfoName');
+  const fileInfoSub = document.getElementById('fileInfoSub');
+
+  // ---- file loading ----
+  browseBtn.addEventListener('click', (e) => { e.stopPropagation(); fileInput.click(); });
+  dropzone.addEventListener('click', () => fileInput.click());
+  dropzone.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') fileInput.click(); });
+  dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('drag'); });
+  dropzone.addEventListener('dragleave', () => dropzone.classList.remove('drag'));
+  dropzone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dropzone.classList.remove('drag');
+    if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+  });
+  fileInput.addEventListener('change', (e) => {
+    if (e.target.files.length) handleFile(e.target.files[0]);
+  });
+  loadNewBtn.addEventListener('click', () => {
+    dropZoneContainer.style.display = '';
+    resultsContainer.style.display = 'none';
+    headerActions.style.display = 'none';
+    fileInput.value = '';
+    fileInfoName.textContent = '';
+    fileInfoSub.textContent = '';
+  });
+
+  function handleFile(file) {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        processConfig(e.target.result, file);
+      } catch (err) {
+        alert('Failed to parse config: ' + err.message);
+        console.error(err);
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  function formatFileSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+
+  function renderFileInfo(file, config, ruleCount) {
+    fileInfoName.textContent = file.name;
+    fileInfoName.title = file.name;
+    const parts = [];
+    if (typeof file.size === 'number') parts.push(formatFileSize(file.size));
+    const ifaceCount = Object.keys(config.interfaces).length;
+    parts.push(`${ifaceCount} interface${ifaceCount === 1 ? '' : 's'}`);
+    parts.push(`${ruleCount} rule${ruleCount === 1 ? '' : 's'} analyzed`);
+    fileInfoSub.innerHTML = parts.map(p => escapeHtml(p)).join('<span class="sep">&middot;</span>');
+  }
+
+  function processConfig(text, file) {
+    CONFIG = parseASAConfig(text);
+    ROWS = buildRuleset(CONFIG);
+    EXPANDED = new Set();
+    sortKey = 'default';
+    sortDir = 'asc';
+    dropZoneContainer.style.display = 'none';
+    resultsContainer.style.display = '';
+    headerActions.style.display = 'flex';
+    if (file) renderFileInfo(file, CONFIG, ROWS.filter(r => r.type === 'rule').length);
+    renderSummary();
+    markSortedHeader();
+    renderTable();
+  }
+
+  // ---- summary strip ----
+  function renderSummary() {
+    // Active (non-inactive) rules are what the firewall actually enforces, so the
+    // summary strip counts those - inactive ACEs are visible in the table (when the
+    // "Show inactive" toggle is on) but don't factor into these headline stats.
+    const ruleRows = ROWS.filter(r => r.type === 'rule' && !r.inactive);
+    const bands = { Critical: 0, High: 0, Medium: 0, Low: 0, None: 0 };
+    let implicitCount = 0;
+    let unloggedCount = 0;
+    for (const r of ruleRows) {
+      bands[r.scored.band.label] = (bands[r.scored.band.label] || 0) + 1;
+      if (r.implicit) implicitCount++;
+      if (r.scored.logging.flagged) unloggedCount++;
+    }
+    summaryEl.innerHTML = `
+      <div class="cell"><div class="n">${ruleRows.length}</div><div class="l">Total rules</div></div>
+      <div class="cell crit"><div class="n">${bands.Critical}</div><div class="l">Critical</div></div>
+      <div class="cell high"><div class="n">${bands.High}</div><div class="l">High</div></div>
+      <div class="cell med"><div class="n">${bands.Medium}</div><div class="l">Medium</div></div>
+      <div class="cell low"><div class="n">${bands.Low}</div><div class="l">Low</div></div>
+      <div class="cell"><div class="n" style="color:${implicitCount ? 'var(--c-critical)' : 'var(--text-bright)'}">${implicitCount}</div><div class="l">Implicit permits</div></div>
+      <div class="cell"><div class="n" style="color:${unloggedCount ? 'var(--c-medium)' : 'var(--text-bright)'}">${unloggedCount}</div><div class="l">No logging</div></div>
+    `;
+  }
+
+  // ---- sorting ----
+  const resetOrderBtn = document.getElementById('resetOrderBtn');
+
+  function markSortedHeader() {
+    document.querySelectorAll('#ruleTable thead th').forEach(t => t.classList.remove('sorted', 'asc'));
+    if (sortKey === 'default') {
+      const th = document.querySelector('#ruleTable thead th[data-sort="ruleNumber"]');
+      if (th) th.classList.add('sorted');
+    } else {
+      const th = document.querySelector(`#ruleTable thead th[data-sort="${sortKey}"]`);
+      if (th) { th.classList.add('sorted'); if (sortDir === 'asc') th.classList.add('asc'); }
+    }
+    if (resetOrderBtn) resetOrderBtn.style.display = sortKey === 'default' ? 'none' : '';
+  }
+
+  document.querySelectorAll('#ruleTable thead th[data-sort]').forEach(th => {
+    th.addEventListener('click', () => {
+      const key = th.dataset.sort;
+      if (sortKey === key) sortDir = sortDir === 'desc' ? 'asc' : 'desc';
+      else { sortKey = key; sortDir = key === 'score' ? 'desc' : 'asc'; }
+      markSortedHeader();
+      renderTable();
+    });
+  });
+
+  if (resetOrderBtn) {
+    resetOrderBtn.addEventListener('click', () => {
+      sortKey = 'default';
+      sortDir = 'asc';
+      markSortedHeader();
+      renderTable();
+    });
+  }
+
+  filterBand.addEventListener('change', renderTable);
+  filterAction.addEventListener('change', renderTable);
+  filterImplicit.addEventListener('change', renderTable);
+  filterLogging.addEventListener('change', renderTable);
+  searchBox.addEventListener('input', debounce(renderTable, 150));
+  if (showInactiveToggle) {
+    showInactiveToggle.addEventListener('change', () => {
+      showInactive = showInactiveToggle.checked;
+      renderTable();
+    });
+  }
+
+  function debounce(fn, ms) {
+    let t;
+    return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+  }
+
+  function endpointText(resolved) {
+    if (!resolved) return '?';
+    switch (resolved.kind) {
+      case 'any': return 'any';
+      case 'host': return resolved.address + (resolved.name ? ` (${resolved.name})` : '');
+      case 'subnet': return `${resolved.address}/${resolved.prefixLen ?? '?'}` + (resolved.name ? ` (${resolved.name})` : '');
+      case 'range': return `${resolved.start}\u2013${resolved.end}`;
+      case 'fqdn': return resolved.address;
+      case 'group': return `${resolved.name} [${resolved.members.length} members]`;
+      case 'literal': return resolved.address;
+      default: return '?';
+    }
+  }
+
+  function serviceText(services) {
+    if (!services || !services.length) return 'any';
+    return services.map(s => {
+      const proto = (s.protocol || 'ip').toUpperCase();
+      if (s.destPort) return s.isRange ? `${proto}/${s.destPort}-${s.destPortEnd}` : `${proto}/${s.destPort}`;
+      return `${proto} (any port)`;
+    }).join(', ');
+  }
+
+  function rowMatchesFilters(row) {
+    if (row.type !== 'rule') return false;
+    const s = row.scored;
+    if (!showInactive && row.inactive) return false;
+    if (filterBand.value !== 'all' && s.band.label !== filterBand.value) return false;
+    if (filterAction.value !== 'all' && s.action !== filterAction.value) return false;
+    if (filterImplicit.value === 'implicit' && !row.implicit) return false;
+    if (filterImplicit.value === 'explicit' && row.implicit) return false;
+    if (filterLogging.value === 'unlogged' && !s.logging.flagged) return false;
+    if (filterLogging.value === 'logged' && s.logging.flagged) return false;
+    const q = searchBox.value.trim().toLowerCase();
+    if (q) {
+      const haystack = [
+        endpointText(s.srcResolved), endpointText(s.dstResolved),
+        serviceText(s.services), row.aclName || '', row.interface || '',
+        s.service.name || ''
+      ].join(' ').toLowerCase();
+      if (!haystack.includes(q)) return false;
+    }
+    return true;
+  }
+
+  // Default order: most-secure interface first (desc security level), tie-broken by
+  // interface name (asc), then by each rule's position within its ACL (asc).
+  // This yields "inside -> outside" style blocks first, "outside -> inside" last,
+  // matching how the ASA itself evaluates and how engineers reason about the ruleset.
+  function compareDefaultOrder(a, b) {
+    const ao = a.defaultOrder, bo = b.defaultOrder;
+    if (ao.level !== bo.level) return bo.level - ao.level; // higher security level first
+    if (ao.ifName !== bo.ifName) return ao.ifName.localeCompare(bo.ifName); // lowest-named interface first on ties
+    return ao.ruleNumber - bo.ruleNumber; // original ACL order
+  }
+
+  function sortRows(rows) {
+    if (sortKey === 'default') {
+      return rows.slice().sort(compareDefaultOrder);
+    }
+    const dir = sortDir === 'asc' ? 1 : -1;
+    return rows.slice().sort((a, b) => {
+      let av, bv;
+      switch (sortKey) {
+        case 'ruleNumber': av = a.ruleNumber ?? 0; bv = b.ruleNumber ?? 0; break;
+        case 'score': av = a.scored.score; bv = b.scored.score; break;
+        case 'action': av = a.scored.action; bv = b.scored.action; break;
+        case 'protocol': av = (a.scored.services[0] && a.scored.services[0].protocol) || ''; bv = (b.scored.services[0] && b.scored.services[0].protocol) || ''; break;
+        case 'src': av = endpointText(a.scored.srcResolved); bv = endpointText(b.scored.srcResolved); break;
+        case 'dst': av = endpointText(a.scored.dstResolved); bv = endpointText(b.scored.dstResolved); break;
+        case 'service': av = serviceText(a.scored.services); bv = serviceText(b.scored.services); break;
+        case 'iface': av = a.interface || ''; bv = b.interface || ''; break;
+        case 'acl': av = a.aclName || ''; bv = b.aclName || ''; break;
+        case 'logging': av = a.scored.logging.flagged ? 0 : 1; bv = b.scored.logging.flagged ? 0 : 1; break;
+        default: av = a.scored.score; bv = b.scored.score;
+      }
+      if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir;
+      return String(av).localeCompare(String(bv)) * dir;
+    });
+  }
+
+  // ---- table rendering ----
+  function renderTable() {
+    const filtered = ROWS.filter(rowMatchesFilters);
+    const sorted = sortRows(filtered);
+    tbody.innerHTML = '';
+
+    if (!sorted.length) {
+      tbody.innerHTML = `<tr><td colspan="11"><div class="empty-state">No rules match the current filters.</div></td></tr>`;
+      footerNote.textContent = '';
+      return;
+    }
+
+    for (const row of sorted) {
+      tbody.appendChild(buildRuleRow(row));
+      if (EXPANDED.has(row.id)) {
+        tbody.appendChild(buildDetailRow(row));
+      }
+    }
+
+    const inactiveCount = ROWS.filter(r => r.type === 'rule' && r.inactive).length;
+    const inactiveNote = inactiveCount
+      ? (showInactive ? ` ${inactiveCount} inactive ACE${inactiveCount === 1 ? '' : 's'} shown dimmed.` : ` ${inactiveCount} inactive ACE${inactiveCount === 1 ? '' : 's'} hidden \u2014 toggle "Show inactive" to view.`)
+      : '';
+    footerNote.textContent = `Showing ${sorted.length} of ${ROWS.filter(r => r.type === 'rule').length} rules.${inactiveNote} Rule # reflects position within its ACL in original config order (including inactive ACEs, matching 'show access-list'). Risk scoring is heuristic \u2014 use as a triage aid, not a compliance verdict.`;
+  }
+
+  function buildRuleRow(row) {
+    const tr = document.createElement('tr');
+    tr.className = 'rule-row' + (EXPANDED.has(row.id) ? ' expanded' : '') + (row.inactive ? ' inactive-row' : '');
+    tr.dataset.rowId = row.id;
+    const s = row.scored;
+    const band = s.band;
+    const isOpen = EXPANDED.has(row.id);
+    const log = s.logging;
+
+    tr.innerHTML = `
+      <td><span class="expand-caret ${isOpen ? 'open' : ''}">\u25B8</span></td>
+      <td class="mono rule-number">${row.ruleNumber ?? '\u2014'}</td>
+      <td class="risk-cell">
+        <div class="risk-bar-wrap">
+          <span class="risk-num" style="color:${band.color}">${s.score}</span>
+        </div>
+        <div class="risk-band-pill" style="background:${band.color}22; color:${band.color}; border:1px solid ${band.color}55;">${band.label}</div>
+      </td>
+      <td><span class="${s.action === 'permit' ? 'action-permit' : 'action-deny'}">${s.action}</span>${row.inactive ? '<span class="inactive-tag">INACTIVE</span>' : ''}</td>
+      <td class="mono">${(s.services[0] && s.services[0].protocol ? s.services[0].protocol : 'ip').toUpperCase()}</td>
+      <td class="mono">${escapeHtml(endpointText(s.srcResolved))}</td>
+      <td class="mono">${escapeHtml(endpointText(s.dstResolved))}</td>
+      <td class="mono">${escapeHtml(serviceText(s.services))}</td>
+      <td>
+        <span class="log-pill ${log.flagged ? 'log-flagged log-sev-' + log.severity : 'log-ok'}" title="${escapeHtml(log.detail)}">
+          ${log.flagged ? '\u26A0 ' : ''}${escapeHtml(log.label)}
+        </span>
+      </td>
+      <td><span class="iface-tag">${escapeHtml(row.interface || '\u2014')}</span>${row.implicit ? '<span class="implicit-tag">IMPLICIT</span>' : ''}</td>
+      <td class="acl-name">${row.aclName ? escapeHtml(row.aclName) : '\u2014'}</td>
+    `;
+    tr.addEventListener('click', () => toggleExpand(row.id));
+    return tr;
+  }
+
+  function toggleExpand(id) {
+    if (EXPANDED.has(id)) EXPANDED.delete(id);
+    else EXPANDED.add(id);
+    renderTable();
+  }
+
+  function buildDetailRow(row) {
+    const tr = document.createElement('tr');
+    tr.className = 'detail-row';
+    const td = document.createElement('td');
+    td.colSpan = 11;
+    const s = row.scored;
+
+    let html = '<div class="detail-panel">';
+
+    if (row.implicit) {
+      html += `<div class="implicit-note"><strong>Implicit rule.</strong> ${escapeHtml(row.implicitNote)}</div>`;
+    }
+    if (row.inactive) {
+      html += `<div class="implicit-note" style="color:var(--text-dim); background:rgba(122,129,148,0.08); border-color:var(--border);"><strong>Inactive ACE.</strong> This line carries the 'inactive' keyword in the config \u2014 the ASA skips it entirely, it is not enforced.</div>`;
+    }
+    if (s.logging.flagged) {
+      const sevColor = s.logging.severity === 'high' ? 'var(--c-critical)' : 'var(--c-high)';
+      html += `<div class="implicit-note" style="color:${sevColor}; background:${sevColor}14; border-color:${sevColor}55;"><strong>${escapeHtml(s.logging.label)}.</strong> ${escapeHtml(s.logging.detail)}</div>`;
+    }
+
+    html += '<div class="detail-grid">';
+
+    // left: source/dest member trees
+    html += '<div class="detail-section"><h4>Source</h4><div class="member-tree">' + renderMemberTree(s.srcResolved) + '</div></div>';
+    html += '<div class="detail-section"><h4>Destination</h4><div class="member-tree">' + renderMemberTree(s.dstResolved) + '</div></div>';
+    html += '</div>';
+
+    // service breakdown
+    html += '<div class="detail-section" style="margin-bottom:14px;"><h4>Service / Protocol</h4><div class="member-tree">' + renderServiceTree(row) + '</div></div>';
+
+    // score explain
+    html += '<div class="detail-section"><h4>Risk calculation</h4><div class="score-explain">';
+    html += `<div class="row"><span class="k">Exposure (source/destination scope)</span><span>${s.exposure.label} \u2014 ${s.exposure.score}</span></div>`;
+    html += `<div class="row"><span class="k">Service risk (worst-case port/protocol)</span><span>${escapeHtml(s.service.name)} \u2014 ${s.service.score}</span></div>`;
+    if (s.service.note) html += `<div class="row"><span class="k" style="font-style:italic;">note</span><span style="font-style:italic;">${escapeHtml(s.service.note)}</span></div>`;
+    html += `<div class="row"><span class="k">Combine</span><span>max(exposure, service)${s.bonusApplied ? ' + 10 (both elevated)' : ''}</span></div>`;
+    html += `<div class="row total"><span class="k">Final score</span><span style="color:${s.band.color}">${s.score} / 100 \u2014 ${s.band.label}</span></div>`;
+    html += `<div class="row" style="margin-top:6px; padding-top:6px; border-top:1px solid var(--border-soft);"><span class="k">Logging</span><span style="${s.logging.flagged ? 'color:' + (s.logging.severity === 'high' ? 'var(--c-critical)' : 'var(--c-high)') : ''}">${escapeHtml(s.logging.label)}</span></div>`;
+    html += '</div></div>';
+
+    html += '</div>';
+    td.innerHTML = html;
+    tr.appendChild(td);
+    return tr;
+  }
+
+  function renderMemberTree(resolved, depth) {
+    depth = depth || 0;
+    if (depth > 6) return '<ul><li class="tag">max depth</li></ul>';
+    if (!resolved) return '<span class="tag">unknown</span>';
+    if (resolved.kind === 'any') return '<span class="tag">scope</span> any (0.0.0.0/0)';
+    if (resolved.kind === 'host') return `<span class="tag">host</span> ${escapeHtml(resolved.address)}${resolved.name ? ' <span class="tag">' + escapeHtml(resolved.name) + '</span>' : ''}`;
+    if (resolved.kind === 'subnet') return `<span class="tag">subnet</span> ${escapeHtml(resolved.address)}/${resolved.prefixLen ?? '?'} (${escapeHtml(resolved.mask || '')})${resolved.name ? ' <span class="tag">' + escapeHtml(resolved.name) + '</span>' : ''}`;
+    if (resolved.kind === 'range') return `<span class="tag">range</span> ${escapeHtml(resolved.start)} \u2013 ${escapeHtml(resolved.end)}`;
+    if (resolved.kind === 'fqdn') return `<span class="tag">fqdn</span> ${escapeHtml(resolved.address)}`;
+    if (resolved.kind === 'literal') return `<span class="tag">${resolved.unresolved ? 'unresolved' : 'literal'}</span> ${escapeHtml(resolved.address)}`;
+    if (resolved.kind === 'group') {
+      let out = `<span class="tag">group</span> ${escapeHtml(resolved.name)} <ul>`;
+      for (const mem of resolved.members) {
+        out += `<li>${renderMemberTree(mem, depth + 1)}</li>`;
+      }
+      out += '</ul>';
+      return out;
+    }
+    return '<span class="tag">?</span>';
+  }
+
+  const RISKY_PORT_NAMES = new Set(['FTP', 'FTP-DATA', 'TFTP', 'SSH', 'Telnet', 'SMB', 'NetBIOS-SSN', 'NetBIOS-NS', 'NetBIOS-DGM', 'RDP', 'VNC', 'MS-RPC']);
+
+  function renderServiceTree(row) {
+    const services = row.scored.services;
+    if (!services || !services.length) return '<span class="tag">any</span> all protocols / ports';
+    let out = '<ul>';
+    for (const svc of services) {
+      const proto = (svc.protocol || 'ip').toLowerCase();
+      const portLabel = svc.destPort ? (svc.isRange ? `${svc.destPort}-${svc.destPortEnd}` : svc.destPort) : null;
+      const lookup = lookupServiceRisk(proto, svc.destPort);
+      const flagged = lookup.score >= 45;
+      out += `<li><span class="tag">${proto.toUpperCase()}</span> ${portLabel ? 'port ' + escapeHtml(portLabel) + ' (' + escapeHtml(lookup.name) + ')' : '<em>any port</em>'}`;
+      if (flagged) out += `<span class="flag">\u26A0 risk ${lookup.score}${lookup.note ? ': ' + escapeHtml(lookup.note) : ''}</span>`;
+      out += '</li>';
+    }
+    out += '</ul>';
+    return out;
+  }
+
+  function escapeHtml(str) {
+    if (str === null || str === undefined) return '';
+    return String(str).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  // ---- CSV export ----
+  exportBtn.addEventListener('click', () => {
+    const ruleRows = sortRows(ROWS.filter(rowMatchesFilters));
+    const header = ['Rule #', 'Score', 'Band', 'Action', 'Inactive', 'Protocol', 'Source', 'Destination', 'Service', 'Interface', 'Direction', 'ACL', 'Implicit', 'Logging', 'Logging Flagged', 'Exposure Label', 'Exposure Score', 'Service Risk Name', 'Service Risk Score'];
+    const lines = [header.join(',')];
+    for (const row of ruleRows) {
+      const s = row.scored;
+      const fields = [
+        row.ruleNumber ?? '',
+        s.score, s.band.label, s.action,
+        row.inactive ? 'yes' : 'no',
+        (s.services[0] && s.services[0].protocol) || 'ip',
+        endpointText(s.srcResolved), endpointText(s.dstResolved), serviceText(s.services),
+        row.interface || '', row.direction || '', row.aclName || '',
+        row.implicit ? 'yes' : 'no',
+        s.logging.label, s.logging.flagged ? 'yes' : 'no',
+        s.exposure.label, s.exposure.score, s.service.name, s.service.score
+      ].map(csvEscape);
+      lines.push(fields.join(','));
+    }
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'asa-rule-risk-export.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  function csvEscape(v) {
+    const s = String(v ?? '');
+    if (s.includes(',') || s.includes('"') || s.includes('\n')) return '"' + s.replace(/"/g, '""') + '"';
+    return s;
+  }
+})();
+
+</script>
+</body>
+</html>
