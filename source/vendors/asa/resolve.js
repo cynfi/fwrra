@@ -135,7 +135,6 @@ function scoreEntry(config, entry) {
       band: riskBand(0),
       exposure: { score: 0, label: 'deny' },
       service: { score: 0, name: 'n/a' },
-      bonusApplied: false,
       services: [],
       logging,
     };
@@ -150,16 +149,19 @@ function scoreEntry(config, entry) {
   // "any port" if any resolved combo has no destPort restriction, or protocol is bare ip/gre/esp etc with no port concept
   const isAnyPort = serviceCombos.some(c => !c.destPort);
 
-  const exposure = computeExposureScore(srcScope, dstScope, isAnyPort);
-
-  // worst-case service risk across all resolved protocol/port combos
+  // worst-case service risk across all resolved protocol/port combos. Looked up
+  // before exposure because exposure's subnet-penalty treatment depends on
+  // this service's subnetPenaltyEligible flag.
   let worstService = { score: 0, name: 'n/a', note: '' };
   for (const combo of serviceCombos) {
     const r = lookupServiceRisk(combo.protocol, combo.destPort);
     if (r.score > worstService.score) worstService = r;
   }
 
-  const { combined, bonusApplied } = combineRisk(exposure.score, worstService.score);
+  const exposure = computeExposureScore(srcScope, dstScope, isAnyPort, !!worstService.subnetPenaltyEligible);
+  const { combined, subnetPenaltyApplied, subnetPenalty } = combineRisk(
+    exposure.score, worstService.score, srcScope, dstScope, !!worstService.subnetPenaltyEligible
+  );
 
   return {
     action: entry.action,
@@ -167,7 +169,8 @@ function scoreEntry(config, entry) {
     band: riskBand(combined),
     exposure,
     service: worstService,
-    bonusApplied,
+    subnetPenaltyApplied,
+    subnetPenalty,
     services: serviceCombos,
     srcResolved,
     dstResolved,
@@ -259,7 +262,6 @@ function buildRuleset(config) {
         band: riskBand(100),
         exposure: { score: 100, label: 'any \u2194 any (implicit)' },
         service: { score: 0, name: 'any' },
-        bonusApplied: false,
         services: [{ protocol: 'ip', destPort: null }],
         srcResolved: { kind: 'any' },
         dstResolved: { kind: 'any' },

@@ -104,11 +104,12 @@ and `ui.js` both depend on:
   score: number,              // 0-100, final combined score
   band: { label, color },     // from shared riskBand()
   exposure: { score, label },
-  service: { score, name, note },
-  bonusApplied: boolean,
+  service: { score, name, note, subnetPenaltyEligible? },
+  subnetPenaltyApplied: boolean,
+  subnetPenalty: number,      // 0 if not applied
   services: Array<{ protocol, destPort?, destPortEnd?, isRange? }>,
   srcResolved, dstResolved,   // resolved endpoint trees, see below
-  srcScope, dstScope,         // from shared classifyEndpointScope()
+  srcScope, dstScope,         // from shared classifyEndpointScope(), includes `breadth`
   logging: { flagged, severity, label, detail },
 }
 ```
@@ -162,31 +163,83 @@ with them unless a vendor's model genuinely doesn't fit:
   toggle is flipped. FortiOS (`set status disable`) and PAN-OS
   (`disabled yes`) have their own equivalents and should follow the same
   pattern.
-- **Risk score = `max(exposure, service) + 10 if both are elevated
-  (≥55), capped at 100`.** This is vendor-neutral, lives in
-  `combineRisk()` in `shared/risk.js`, and applies identically regardless
-  of which vendor produced the exposure/service inputs. Chosen over pure
-  addition or a weighted sum so neither an "any/any on a safe port" nor a
-  "narrow host-pair on a risky port" rule dominates unfairly. The
-  `ELEVATED_THRESHOLD` (55) and `BOTH_ELEVATED_BONUS` (10) constants are
-  tunable but were picked deliberately; don't change them without
-  checking in.
-- **Exposure scoring anchors** (also vendor-neutral, in
-  `computeExposureScore()`): any↔any = 100, deny = 0 always, host↔host
-  unidirectional single-port = 20, host↔host any-port
-  (bidirectional-equivalent) = 50. Everything else scales between these
-  anchors based on prefix length. Subnets with prefix length ≤ 23 are
-  treated as "large" and score higher than smaller subnets. A vendor
-  whose object model doesn't map cleanly onto host/subnet/any (e.g. FQDN
-  objects, dynamic address groups) should resolve down to the closest
-  fit in `classifyEndpointScope()`'s vocabulary rather than inventing a
-  parallel scoring path.
-- **Service risk table (`SERVICE_RISK_TABLE` in `shared/risk.js`)** is
-  vendor-neutral (keyed by protocol/port, not vendor syntax) and is a
-  starting point covering common file-transfer/lateral-movement vectors
-  (FTP, TFTP, SSH, Telnet, SMB, NetBIOS, RDP, VNC, etc.), not exhaustive.
-  Every vendor shares this table — don't fork it per vendor. If the user
-  asks to add/adjust ports, edit this table directly.
+- **Risk score = a "noisy-OR" combine of exposure and service:
+  `combined = exposure + service − (exposure × service ⁄ 100)`, plus an
+  additive "indiscriminate subnet" penalty for eligible services, capped
+  at 100.** This replaced an earlier `max(exposure, service) +
+  10-if-both-≥55` formula (see git history if you need the old one) after
+  a governance review found the threshold-cliff version let SSH/RDP
+  (service score 50) permanently miss the elevated-bonus that
+  otherwise-comparable services at 55+ received, and let scope-narrowing
+  below the service score have literally zero effect on the combined
+  number. The noisy-OR form is monotonic and cliff-free by construction —
+  increasing either input can never decrease the combined score — and at
+  zero exposure (a strict host↔host rule) it reduces to exactly the
+  service's own table score, which is what makes the least-privilege
+  story work: a host-to-host SSH rule lands at SSH's score (50, Medium)
+  because that's SSH's own inherent risk, not a special case. This lives
+  in `combineRisk()` in `shared/risk.js` and is vendor-neutral. Don't
+  reintroduce a threshold/cliff mechanism without checking in.
+- **Exposure scoring is address-space-breadth-based, not a bucketed
+  lookup table.** `classifyEndpointScope()` reduces every endpoint to a
+  `breadth` score on a continuous log2 scale:
+  `breadth = log2(addressCount) / 32 × 100` — a `/32` host is 0, a `/24`
+  is 25, a `/16` is 50, a `/8` is 75, `any` (2^32 addresses) is 100. This
+  is what makes a "/32 subnet" object and a host object score identically
+  (both `addressCount = 1`), and what makes broadening a destination
+  always score ≥ a narrower one — the previous per-combination bucket
+  table had a monotonicity bug where a `/24` destination could score
+  *below* a single-host destination. `computeExposureScore()` blends
+  src/dst breadth as `0.75 × broader-side + 0.25 × narrower-side` (so
+  "any" on one side alone doesn't saturate to the same score as "any" on
+  both sides) before combining with service risk. An object-group's
+  breadth is the **sum** of its members' address counts (recursively),
+  not just its narrowest member — a 3-host group and a 300-host group are
+  no longer indistinguishable. `deny` is still always 0, `any↔any` is
+  still always 100 (the noisy-OR formula gives this for free: if either
+  input is 100, the result is 100 regardless of the other). A vendor
+  whose object model doesn't map cleanly onto host/subnet/any/group (e.g.
+  FQDN objects, dynamic address groups) should resolve down to the
+  closest fit in this vocabulary rather than inventing a parallel scoring
+  path.
+- **Indiscriminate-subnet penalty**: a small set of services
+  (`subnetPenaltyEligible: true` in `SERVICE_RISK_TABLE`) get an
+  additional, explicit penalty when either endpoint is a **raw CIDR
+  subnet** larger than `/30` (more than 4 addresses):
+  `penalty = 2^(32 − prefixLen)`, added on top of the noisy-OR combine
+  and capped at 100 (e.g. host→`/27` SSH = `50 (SSH's score) + 32 (2^5)
+  = 82`). This does **not** apply to object-groups, no matter how large —
+  the rationale (per user governance input) is that a subnet is
+  *indiscriminate* (anyone who lands an address in that range gets
+  access, intentionally or not — DHCP reassignment, a new VM, a
+  compromised neighbor), while a group is a *deliberately curated,
+  documented* list of hosts and stays lower-risk even at similar size.
+  Currently flagged eligible: SSH, RDP, Telnet, FTP/FTP-DATA/TFTP,
+  SMB/NetBIOS-SSN, the database/infra ports (MS-SQL, MySQL, PostgreSQL,
+  Redis, Elasticsearch, MongoDB, Docker API, Kubernetes API/kubelet, alt
+  web/admin ports, Memcached, SNMP), and the legacy/no-legitimate-use
+  ports commonly used to disguise C2/backdoor traffic (tcpmux, echo,
+  discard, systat, daytime, netstat, chargen, finger, bootp, XDMCP,
+  rexec, lpr, talk/ntalk, uucp, the Cisco AUX binary port, UPnP/SSDP, and
+  NetBus). Don't flag additional services eligible, or change the `/30`
+  threshold or `2^hostBits` growth rate, without checking in — this is a
+  deliberately steep curve (a `/26` or larger already saturates a
+  flagged service to Critical) and was calibrated against specific
+  worked examples with the user.
+- **Service risk table (`SERVICE_RISK_TABLE` / `PROTOCOL_WHOLE_RISK` in
+  `shared/risk.js`)** is vendor-neutral (keyed by protocol/port, not
+  vendor syntax) and is a starting point, not exhaustive. It now also
+  distinguishes *why* a protocol is risky, not just how much: SSH is
+  scored on its tunneling/inspection-defeating capability (it can
+  encapsulate arbitrary protocols even when perfectly scoped to
+  host↔host), Telnet is scored higher despite being passively inspectable
+  because cleartext credential exposure isn't mitigated by
+  after-the-fact detection, and file-transfer protocols (FTP/TFTP/SMB)
+  are scored on bulk exfil/lateral-movement risk rather than either of
+  those. Keep that reasoning in mind before changing an existing score —
+  the exact number matters less than which of these risk mechanisms it's
+  meant to represent. Every vendor shares this table — don't fork it per
+  vendor. If the user asks to add/adjust ports, edit this table directly.
 - **Implicit permit-any/any synthesis** is currently ASA-specific logic
   (in `vendors/asa/resolve.js`) modeling the ASA's real default behavior:
   for every interface pair where the source's security level is strictly

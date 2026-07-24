@@ -353,7 +353,7 @@
     html += `<div class="row"><span class="k">Exposure (source/destination scope)</span><span>${s.exposure.label} \u2014 ${s.exposure.score}</span></div>`;
     html += `<div class="row"><span class="k">Service risk (worst-case port/protocol)</span><span>${escapeHtml(s.service.name)} \u2014 ${s.service.score}</span></div>`;
     if (s.service.note) html += `<div class="row"><span class="k" style="font-style:italic;">note</span><span style="font-style:italic;">${escapeHtml(s.service.note)}</span></div>`;
-    html += `<div class="row"><span class="k">Combine</span><span>max(exposure, service)${s.bonusApplied ? ' + 10 (both elevated)' : ''}</span></div>`;
+    html += `<div class="row"><span class="k">Combine</span><span>exposure + service − (exposure × service ⁄ 100)${s.subnetPenaltyApplied ? ` + ${s.subnetPenalty} (indiscriminate subnet penalty)` : ''}</span></div>`;
     html += `<div class="row total"><span class="k">Final score</span><span style="color:${s.band.color}">${s.score} / 100 \u2014 ${s.band.label}</span></div>`;
     html += `<div class="row" style="margin-top:6px; padding-top:6px; border-top:1px solid var(--border-soft);"><span class="k">Logging</span><span style="${s.logging.flagged ? 'color:' + (s.logging.severity === 'high' ? 'var(--c-critical)' : 'var(--c-high)') : ''}">${escapeHtml(s.logging.label)}</span></div>`;
     html += '</div></div>';
