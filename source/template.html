@@ -184,6 +184,10 @@
     border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; margin-left: 6px;
     text-transform: uppercase;
   }
+  .buyback-tag {
+    font-family: var(--mono); font-size: 10px; font-weight: 700; color: var(--c-low);
+    margin-left: 6px; white-space: nowrap; opacity: 0.9;
+  }
   .action-permit { color: var(--c-low); font-weight: 600; font-family: var(--mono); font-size: 11.5px; text-transform: uppercase; }
   .action-deny { color: var(--text-dim); font-weight: 600; font-family: var(--mono); font-size: 11.5px; text-transform: uppercase; }
 
@@ -287,6 +291,13 @@
     </div>
     <div class="summary" id="summary"></div>
     <div class="controls">
+      <label class="toggle-label" for="roleSelect" title="Firewall role changes scoring: Internet-facing treats broad/any outbound as the expected baseline (outbound-to-internet is the box's job); Internal segmentation penalizes broad outbound since data isn't meant to leave a zone. Auto-detected from routing — override here.">
+        <span>Role</span>
+        <select id="roleSelect">
+          <option value="internet-facing">Internet-facing</option>
+          <option value="internal">Internal segmentation</option>
+        </select>
+      </label>
       <select id="filterBand">
         <option value="all">All risk levels</option>
         <option value="Critical">Critical only</option>

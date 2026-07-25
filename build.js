@@ -35,25 +35,38 @@ const OUT_DIR = path.join(__dirname, 'dist');
 
 // Vendors wired into the build. Each needs source/vendors/<name>/parser.js
 // and source/vendors/<name>/resolve.js.
-const VENDORS = ['asa'];
+const VENDORS = ['asa', 'fortios'];
 
 function read(...parts) {
   return fs.readFileSync(path.join(SRC, ...parts), 'utf8');
 }
 
 function sharedModules() {
-  // Load order matters within shared/ too: logging.js has no dependencies,
-  // risk.js has none either, so this order is only about what reads
-  // naturally, not a hard requirement today.
-  return [read('shared', 'logging.js'), read('shared', 'risk.js')].join('\n');
+  // Load order within shared/: logging.js and risk.js have no dependencies;
+  // registry.js defines VENDOR_REGISTRY/registerVendor/detectVendor, which the
+  // vendor IIFEs (below) and ui.js both rely on being global by the time they
+  // run. All three are plain globals shared across every vendor.
+  return [
+    read('shared', 'logging.js'),
+    read('shared', 'registry.js'),
+    read('shared', 'risk.js'),
+  ].join('\n');
 }
 
 function vendorEngine(vendorName) {
   const dir = ['vendors', vendorName];
   // parser.js must load before resolve.js: resolve.js's scoreEntry()/
-  // buildRuleset() consume the {objects, groups, interfaces, acls,
-  // accessGroups} shape parser.js's parseASAConfig()-equivalent produces.
-  return [read(...dir, 'parser.js'), read(...dir, 'resolve.js')].join('\n');
+  // buildRuleset() consume the parsed-config shape parser.js produces.
+  const body = [read(...dir, 'parser.js'), read(...dir, 'resolve.js')].join('\n');
+  // Wrap each vendor's engine in its OWN IIFE. Without this, every vendor's
+  // top-level declarations (buildRuleset, scoreEntry, resolveEndpoint,
+  // classifyLogging, tokenize, ...) would be globals and the second vendor
+  // concatenated into a combined build would clobber the first. Inside the
+  // IIFE those names stay private; the vendor exposes itself to the rest of
+  // the page only by calling the global registerVendor() (from resolve.js).
+  // Shared helpers (risk.js, logging.js, registry.js) remain global and are
+  // reachable from inside the IIFE via normal closure over the outer scope.
+  return `// ---- vendor engine: ${vendorName} ----\n;(function () {\n${body}\n})();`;
 }
 
 function buildOne(template, vendorNames, outFile) {

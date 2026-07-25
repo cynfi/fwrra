@@ -1,5 +1,7 @@
 (function () {
   let CONFIG = null;
+  let CURRENT_VENDOR = null;
+  let CURRENT_ROLE = 'internet-facing';
   let ROWS = [];
   let EXPANDED = new Set();
   let sortKey = 'default';
@@ -21,6 +23,7 @@
   const filterImplicit = document.getElementById('filterImplicit');
   const filterLogging = document.getElementById('filterLogging');
   const showInactiveToggle = document.getElementById('showInactiveToggle');
+  const roleSelect = document.getElementById('roleSelect');
   const searchBox = document.getElementById('searchBox');
   const footerNote = document.getElementById('footerNote');
   const fileInfoName = document.getElementById('fileInfoName');
@@ -72,16 +75,24 @@
     fileInfoName.textContent = file.name;
     fileInfoName.title = file.name;
     const parts = [];
+    if (CURRENT_VENDOR) parts.push(CURRENT_VENDOR.label);
     if (typeof file.size === 'number') parts.push(formatFileSize(file.size));
-    const ifaceCount = Object.keys(config.interfaces).length;
+    const ifaceCount = Object.keys(config.interfaces || {}).length;
     parts.push(`${ifaceCount} interface${ifaceCount === 1 ? '' : 's'}`);
     parts.push(`${ruleCount} rule${ruleCount === 1 ? '' : 's'} analyzed`);
     fileInfoSub.innerHTML = parts.map(p => escapeHtml(p)).join('<span class="sep">&middot;</span>');
   }
 
   function processConfig(text, file) {
-    CONFIG = parseASAConfig(text);
-    ROWS = buildRuleset(CONFIG);
+    const vendor = detectVendor(text);
+    if (!vendor) {
+      throw new Error('Could not recognize this file as a supported firewall config (Cisco ASA or FortiOS/FortiGate).');
+    }
+    CURRENT_VENDOR = vendor;
+    CONFIG = vendor.parse(text);
+    CURRENT_ROLE = vendor.detectRole ? vendor.detectRole(CONFIG) : 'internet-facing';
+    if (roleSelect) roleSelect.value = CURRENT_ROLE;
+    ROWS = vendor.buildRuleset(CONFIG, { firewallRole: CURRENT_ROLE });
     EXPANDED = new Set();
     sortKey = 'default';
     sortDir = 'asc';
@@ -157,6 +168,19 @@
   filterAction.addEventListener('change', renderTable);
   filterImplicit.addEventListener('change', renderTable);
   filterLogging.addEventListener('change', renderTable);
+  if (roleSelect) {
+    // Changing the firewall role re-scores every rule (direction-aware
+    // exposure), so rebuild the ruleset from the already-parsed config and
+    // re-render — no re-parse needed.
+    roleSelect.addEventListener('change', () => {
+      if (!CONFIG || !CURRENT_VENDOR) return;
+      CURRENT_ROLE = roleSelect.value;
+      ROWS = CURRENT_VENDOR.buildRuleset(CONFIG, { firewallRole: CURRENT_ROLE });
+      EXPANDED = new Set();
+      renderSummary();
+      renderTable();
+    });
+  }
   searchBox.addEventListener('input', debounce(renderTable, 150));
   if (showInactiveToggle) {
     showInactiveToggle.addEventListener('change', () => {
@@ -178,7 +202,9 @@
       case 'subnet': return `${resolved.address}/${resolved.prefixLen ?? '?'}` + (resolved.name ? ` (${resolved.name})` : '');
       case 'range': return `${resolved.start}\u2013${resolved.end}`;
       case 'fqdn': return resolved.address;
-      case 'group': return `${resolved.name} [${resolved.members.length} members]`;
+      case 'group': return resolved.name
+        ? `${resolved.name} [${resolved.members.length} members]`
+        : `${resolved.members.length} addresses`;
       case 'literal': return resolved.address;
       default: return '?';
     }
@@ -291,7 +317,7 @@
       <td class="mono rule-number">${row.ruleNumber ?? '\u2014'}</td>
       <td class="risk-cell">
         <div class="risk-bar-wrap">
-          <span class="risk-num" style="color:${band.color}">${s.score}</span>
+          <span class="risk-num" style="color:${band.color}">${s.score}</span>${s.buyback && s.buyback.credit > 0 ? `<span class="buyback-tag" title="Compensating controls in the rulebase reduce this to ${s.inContextScore} in-context (−${s.buyback.credit}). Expand for detail.">→ ${s.inContextScore}</span>` : ''}
         </div>
         <div class="risk-band-pill" style="background:${band.color}22; color:${band.color}; border:1px solid ${band.color}55;">${band.label}</div>
       </td>
@@ -354,7 +380,22 @@
     html += `<div class="row"><span class="k">Service risk (worst-case port/protocol)</span><span>${escapeHtml(s.service.name)} \u2014 ${s.service.score}</span></div>`;
     if (s.service.note) html += `<div class="row"><span class="k" style="font-style:italic;">note</span><span style="font-style:italic;">${escapeHtml(s.service.note)}</span></div>`;
     html += `<div class="row"><span class="k">Combine</span><span>exposure + service − (exposure × service ⁄ 100)${s.subnetPenaltyApplied ? ` + ${s.subnetPenalty} (indiscriminate subnet penalty)` : ''}</span></div>`;
-    html += `<div class="row total"><span class="k">Final score</span><span style="color:${s.band.color}">${s.score} / 100 \u2014 ${s.band.label}</span></div>`;
+    html += `<div class="row total"><span class="k">Inherent score</span><span style="color:${s.band.color}">${s.score} / 100 \u2014 ${s.band.label}</span></div>`;
+    // Buyback / hardening credit (in-context score) \u2014 only when a preceding
+    // matching deny carves high-risk ports or threat-geo out of this permit.
+    if (s.buyback && s.buyback.credit > 0) {
+      const parts = [];
+      if (s.buyback.blockedPorts && s.buyback.blockedPorts.length) {
+        parts.push('ports ' + s.buyback.blockedPorts.map(p => escapeHtml(p.key)).join(', ') + ` (\u2212${s.buyback.portCredit})`);
+      }
+      if (s.buyback.blockedGeo && s.buyback.blockedGeo.length) {
+        parts.push(`${s.buyback.blockedGeo.length} threat-geo block${s.buyback.blockedGeo.length === 1 ? '' : 's'} (\u2212${s.buyback.geoCredit})`);
+      }
+      html += `<div class="row"><span class="k">Hardening buyback (compensating controls)</span><span>\u2212${s.buyback.credit}: ${parts.join('; ')}</span></div>`;
+      const icBand = s.inContextBand || s.band;
+      html += `<div class="row total"><span class="k">In-context score</span><span style="color:${icBand.color}">${s.inContextScore} / 100 \u2014 ${icBand.label}</span></div>`;
+      html += `<div class="row" style="font-style:italic; color:var(--text-dim);"><span class="k"></span><span>credit reflects that a matching block exists and precedes this rule; rule-order effectiveness (shadowing) is not verified</span></div>`;
+    }
     html += `<div class="row" style="margin-top:6px; padding-top:6px; border-top:1px solid var(--border-soft);"><span class="k">Logging</span><span style="${s.logging.flagged ? 'color:' + (s.logging.severity === 'high' ? 'var(--c-critical)' : 'var(--c-high)') : ''}">${escapeHtml(s.logging.label)}</span></div>`;
     html += '</div></div>';
 
@@ -375,7 +416,8 @@
     if (resolved.kind === 'fqdn') return `<span class="tag">fqdn</span> ${escapeHtml(resolved.address)}`;
     if (resolved.kind === 'literal') return `<span class="tag">${resolved.unresolved ? 'unresolved' : 'literal'}</span> ${escapeHtml(resolved.address)}`;
     if (resolved.kind === 'group') {
-      let out = `<span class="tag">group</span> ${escapeHtml(resolved.name)} <ul>`;
+      const groupLabel = resolved.name ? escapeHtml(resolved.name) : `<em>${resolved.members.length} addresses</em>`;
+      let out = `<span class="tag">group</span> ${groupLabel} <ul>`;
       for (const mem of resolved.members) {
         out += `<li>${renderMemberTree(mem, depth + 1)}</li>`;
       }

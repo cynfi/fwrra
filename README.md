@@ -5,9 +5,11 @@ scores every enforced rule for exposure risk — the kind of triage view
 vendor management consoles don't give you in one place. It runs entirely
 client-side: nothing you load is uploaded anywhere.
 
-**Current vendor support: Cisco ASA.** FortiGate (FortiOS) and Palo Alto
-(PAN-OS) support is planned — see [Multi-vendor architecture](#multi-vendor-architecture)
-below for how the codebase is laid out to support that.
+**Current vendor support: Cisco ASA and Fortinet FortiGate (FortiOS).**
+Palo Alto (PAN-OS) support is planned — see
+[Multi-vendor architecture](#multi-vendor-architecture) below for how the
+codebase is laid out to support that. Drop a config from either supported
+vendor onto the combined build and it auto-detects which parser to use.
 
 ## What it does
 
@@ -62,10 +64,37 @@ rest of the config to give you an accurate picture:
 - **NAT is ignored.** `nat`, `global`, and `static` lines are not parsed
   and have no effect on scoring.
 
-Each additional vendor will get its own version of this section once its
-parser lands — the general shape (whole config in, NAT ignored, zone/
-interface + rule-application + object + logging all evaluated) is the
-intended pattern for every vendor, not just ASA.
+## How it reads your config (Fortinet FortiOS)
+
+Paste in the **whole configuration** (a full `show` or a config backup —
+the `#config-version=FGT...` header is how the tool recognizes it). As with
+ASA, it needs the surrounding config, not just the policy table:
+
+- **Interfaces and routing**: every `config system interface` block (name,
+  `set role`, IP) plus `config router static`. FortiGate has no numeric
+  security-level, so the tool infers trust for rule ordering from routing:
+  the interface that egresses a **default route** (a static route with no
+  `set dst`, i.e. `0.0.0.0/0` — the gateway can be dynamic/DHCP with no IP)
+  is treated as the internet edge / least trusted, then `set role`
+  (wan/dmz/lan) fills in the rest.
+- **Policies**: every `config firewall policy`. FortiGate default-denies,
+  so — unlike ASA — there's no implicit-permit to synthesize; only explicit
+  policies are scored. A policy with `set status disable` is tagged
+  inactive (hidden by default, toggleable), not dropped, and keeps its
+  FortiGate policy ID.
+- **Addresses and services**: `firewall address`/`addrgrp` and
+  `firewall service custom`/`group`, resolved recursively (a policy's
+  multi-member `srcaddr`/`dstaddr` list is treated as an intentional group;
+  `all` means any).
+- **Logging**: `set logtraffic all | utm | disable` (or absent) populates
+  the Logging column, with the same flagging as ASA.
+- **NAT is ignored.** `set nat enable`, VIPs, and IP pools are not parsed
+  and have no effect on scoring.
+
+The general shape is the same for every vendor (whole config in, NAT
+ignored, zone/interface + rule-application + object + logging all
+evaluated); PAN-OS will get its own version of this section when its parser
+lands.
 
 ## Using it
 
@@ -102,10 +131,11 @@ No dependencies, no bundler — `build.js` uses only Node's built-in
 ```
 source/
   shared/           # vendor-neutral: risk scoring math, syslog severity
-                     # naming. Every vendor's resolve.js uses these.
+                     # naming, and the vendor registry/auto-detect. Every
+                     # vendor's resolve.js uses these.
   vendors/
     asa/            # Cisco ASA: parser.js + resolve.js
-    fortios/        # (planned) FortiGate
+    fortios/        # Fortinet FortiGate: parser.js + resolve.js
     panos/          # (planned) Palo Alto
   ui.js             # vendor-neutral presentation layer
   template.html     # page shell, styles, DOM structure
@@ -114,11 +144,13 @@ source/
 Adding a vendor means writing a `parser.js` (raw config text → a
 vendor-shaped intermediate representation) and a `resolve.js`
 (intermediate representation → the scored, UI-ready rule list) for that
-vendor, then wiring its name into `build.js`'s `VENDORS` array.
-`ui.js` and `shared/` don't need to change — they consume the scored-rule
-shape as a black box. See `CLAUDE.md` for the exact contract `resolve.js`
-needs to satisfy and the design decisions baked into the ASA
-implementation that new vendors should stay consistent with (or
+vendor, registering it with `registerVendor({ id, label, detect, parse,
+buildRuleset })` at the bottom of its `resolve.js`, then adding its name to
+`build.js`'s `VENDORS` array. `ui.js` and `shared/` don't need to change —
+`ui.js` auto-detects the vendor from the dropped config and consumes the
+scored-rule shape as a black box. See `CLAUDE.md` for the exact contract
+`resolve.js` needs to satisfy and the design decisions baked into the
+existing implementations that new vendors should stay consistent with (or
 deliberately diverge from, if a vendor's model genuinely calls for it).
 
 ## Disclaimer

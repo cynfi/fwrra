@@ -184,6 +184,10 @@
     border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; margin-left: 6px;
     text-transform: uppercase;
   }
+  .buyback-tag {
+    font-family: var(--mono); font-size: 10px; font-weight: 700; color: var(--c-low);
+    margin-left: 6px; white-space: nowrap; opacity: 0.9;
+  }
   .action-permit { color: var(--c-low); font-weight: 600; font-family: var(--mono); font-size: 11.5px; text-transform: uppercase; }
   .action-deny { color: var(--text-dim); font-weight: 600; font-family: var(--mono); font-size: 11.5px; text-transform: uppercase; }
 
@@ -287,6 +291,13 @@
     </div>
     <div class="summary" id="summary"></div>
     <div class="controls">
+      <label class="toggle-label" for="roleSelect" title="Firewall role changes scoring: Internet-facing treats broad/any outbound as the expected baseline (outbound-to-internet is the box's job); Internal segmentation penalizes broad outbound since data isn't meant to leave a zone. Auto-detected from routing — override here.">
+        <span>Role</span>
+        <select id="roleSelect">
+          <option value="internet-facing">Internet-facing</option>
+          <option value="internal">Internal segmentation</option>
+        </select>
+      </label>
       <select id="filterBand">
         <option value="all">All risk levels</option>
         <option value="Critical">Critical only</option>
@@ -363,6 +374,45 @@ const SYSLOG_LEVEL_NAMES = {
   0: 'Emergency', 1: 'Alert', 2: 'Critical', 3: 'Error',
   4: 'Warning', 5: 'Notification', 6: 'Informational', 7: 'Debugging',
 };
+
+// ============================================================
+// Vendor registry + auto-detection
+// ============================================================
+// Each vendor's engine (its parser.js + resolve.js, wrapped together in a
+// single IIFE by build.js so their internal top-level names stay private and
+// don't collide across vendors) calls registerVendor() with its public API.
+// ui.js consumes this registry to pick the right parser for a dropped config
+// WITHOUT ever branching on vendor identity itself — it just asks each vendor
+// to score the text via detect() and uses the best match.
+//
+// vendor shape:
+//   {
+//     id:          'asa' | 'fortios' | ...   (stable machine id)
+//     label:       'Cisco ASA'               (human-facing name)
+//     detect(text) -> number                 (confidence 0..N; higher wins, 0 = not mine)
+//     parse(text)  -> config                 (vendor-internal parsed shape)
+//     buildRuleset(config) -> Array<Row>     (the vendor contract ui.js renders)
+//   }
+const VENDOR_REGISTRY = [];
+
+function registerVendor(vendor) {
+  VENDOR_REGISTRY.push(vendor);
+}
+
+// Pick the highest-confidence vendor for a given config text.
+// Returns the winning vendor object, or null if nothing claims it.
+function detectVendor(text) {
+  let best = null;
+  let bestScore = 0;
+  for (const v of VENDOR_REGISTRY) {
+    const score = typeof v.detect === 'function' ? (v.detect(text) || 0) : 0;
+    if (score > bestScore) {
+      bestScore = score;
+      best = v;
+    }
+  }
+  return best;
+}
 
 // ============================================================
 // Risk Scoring Engine
@@ -610,6 +660,35 @@ function effectiveBreadth(scope, eligible) {
   return scope.breadth;
 }
 
+// --- Zone-trust classes & rule direction (DESIGN.md §3) ---
+//
+// Each vendor reduces an interface/zone to a normalized 0-100 trust ordinal
+// (higher = more trusted): ASA's native security-level, FortiOS's
+// default-route/role-derived level, etc. trustClassFromLevel() buckets that
+// into the three governance classes the direction model and the (upcoming)
+// policy-standards layer share. Only the `internet` class actually drives
+// direction; the dmz/internal split matters for policy standards.
+function trustClassFromLevel(level) {
+  if (level === null || level === undefined) return 'unknown';
+  if (level <= 15) return 'internet';   // wan / outside / default-route egress
+  if (level >= 60) return 'internal';   // lan / inside / untagged-internal
+  return 'dmz';
+}
+
+// Direction of a rule from its source/destination zone classes, honoring the
+// firewall role. On an `internal` (segmentation) firewall there is no internet
+// edge, so everything is treated as `internal` (symmetric blend, broad-outbound
+// penalized). On an `internet-facing` firewall, a rule whose destination is the
+// internet is `egress` (outbound-to-internet is the expected baseline — scored
+// on source breadth, not the expected-broad destination); a rule sourced from
+// the internet is `ingress` (the dangerous direction, scored as before).
+function ruleDirection(srcClass, dstClass, role) {
+  if (role === 'internal') return 'internal';
+  if (dstClass === 'internet' && srcClass !== 'internet') return 'egress';
+  if (srcClass === 'internet') return 'ingress';
+  return 'internal';
+}
+
 // Exposure score from src/dst breadth. The broader side dominates (weight
 // 0.75) but the narrower side still contributes (weight 0.25), so "any" on
 // one side alone doesn't automatically saturate to the same score as "any on
@@ -618,20 +697,49 @@ function effectiveBreadth(scope, eligible) {
 // continuous formula covering every src/dst kind pairing, replacing the old
 // per-combination bucket tables (which had a monotonicity bug where a /24
 // destination could score *below* a single-host destination).
+//
+// `direction` (DESIGN.md §3) makes egress special: on an internet-facing
+// firewall a broad/`any` DESTINATION on an outbound rule is the expected
+// baseline (reaching the internet is the box's job), so egress exposure is
+// driven by how broad the SOURCE is, not the destination. The unrestricted-
+// ports risk of a "service any" egress rule is carried by the service score in
+// combineRisk(), so egress does NOT also take the any-port breadth bump (that
+// would double-count). ingress/internal keep the original symmetric blend.
 const BREADTH_WEIGHT_MAJOR = 0.75;
 const BREADTH_WEIGHT_MINOR = 0.25;
 const ANY_PORT_BREADTH_BUMP = 15;
+// Egress exposure weight on source breadth, ranging from EGRESS_MIN (narrow
+// destination) to EGRESS_MIN+EGRESS_SPAN (broad/any destination). Capped at 0.5
+// so egress exposure tops out at 50 and the SERVICE score dominates the
+// combined result — for outbound rules, *what* may leave matters more than how
+// many hosts may initiate it.
+const EGRESS_SRC_WEIGHT_MIN = 0.25;
+const EGRESS_SRC_WEIGHT_SPAN = 0.25;
 
-function computeExposureScore(srcScope, dstScope, isAnyPort, subnetPenaltyEligible) {
+function computeExposureScore(srcScope, dstScope, isAnyPort, subnetPenaltyEligible, direction) {
   const srcBreadth = effectiveBreadth(srcScope, subnetPenaltyEligible);
   const dstBreadth = effectiveBreadth(dstScope, subnetPenaltyEligible);
-  const hi = Math.max(srcBreadth, dstBreadth);
-  const lo = Math.min(srcBreadth, dstBreadth);
-  let score = hi * BREADTH_WEIGHT_MAJOR + lo * BREADTH_WEIGHT_MINOR;
-  if (isAnyPort) score = Math.min(100, score + ANY_PORT_BREADTH_BUMP);
+  let score, label;
+  if (direction === 'egress') {
+    // Outbound to the internet. A broad/any DESTINATION is the expected baseline
+    // (reaching the internet is the box's job) and is NOT penalized — but a
+    // NARROW destination is genuine least-privilege (e.g. egress restricted to
+    // named resolvers) and reduces risk. Source breadth (how many internal
+    // hosts may egress) is the primary exposure axis; the any-port bump is
+    // skipped because the service score already carries the "what may leave"
+    // risk in combineRisk().
+    const srcWeight = EGRESS_SRC_WEIGHT_MIN + EGRESS_SRC_WEIGHT_SPAN * (dstBreadth / 100);
+    score = srcBreadth * srcWeight;
+    label = `${scopeLabel(srcScope)} → ${scopeLabel(dstScope)} (egress)`;
+  } else {
+    const hi = Math.max(srcBreadth, dstBreadth);
+    const lo = Math.min(srcBreadth, dstBreadth);
+    score = hi * BREADTH_WEIGHT_MAJOR + lo * BREADTH_WEIGHT_MINOR;
+    if (isAnyPort) score = Math.min(100, score + ANY_PORT_BREADTH_BUMP);
+    label = `${scopeLabel(srcScope)} ↔ ${scopeLabel(dstScope)}`;
+  }
   score = Math.round(Math.min(100, score));
-  const label = `${scopeLabel(srcScope)} ↔ ${scopeLabel(dstScope)}`;
-  return { score, label };
+  return { score, label, direction: direction || 'internal' };
 }
 
 // Combine exposure + service risk via a "noisy-OR": combined = e + s - e*s/100.
@@ -662,6 +770,167 @@ function riskBand(score) {
   return { label: 'None', color: '#4b5563' };
 }
 
+// ============================================================
+// Buyback / hardening credit (DESIGN.md §4)
+// ============================================================
+// A broad permit is less risky when the rulebase first carves the dangerous
+// slices out of it. When a preceding, enabled, matching DENY blocks a high-risk
+// port (or a threat-geo destination) that a broad permit would otherwise allow,
+// the permit earns "buyback" credit that reduces its in-context score. This is
+// rulebase-level *matching* (needs the whole ordered list) whose result lands on
+// the individual broad rule. Shadow analysis is deliberately out of scope — we
+// credit that a matching block exists and precedes the permit; we do NOT verify
+// it isn't itself shadowed by an earlier broader permit (that's a policy-analysis
+// tool's job). The per-port weights are the real-world value of blocking the
+// port at an edge, NOT the raw service-risk score (obsolete ports whose inherent
+// score overstates present-day relevance are discounted). Tunable, like the
+// subnet-penalty set.
+const BUYBACK_CREDIT = {
+  // Tier 1 — top-value edge blocks
+  'tcp/445': 5,                 // SMB
+  'tcp/2375': 4,                // Docker API (no TLS) — root on the host
+  'tcp/12345': 4, 'tcp/12346': 4, // NetBus backdoor
+  'tcp/21': 4, 'tcp/20': 4,     // FTP / FTP-DATA
+  'tcp/22': 3,                  // SSH
+  'tcp/3389': 3,                // RDP
+  'udp/69': 3,                  // TFTP
+  'tcp/23': 2,                  // Telnet
+  // Tier 2 — mid value (1 each)
+  'tcp/139': 1,                 // NetBIOS-SSN
+  'tcp/512': 1,                 // rexec
+  'tcp/1433': 1, 'tcp/3306': 1, 'tcp/5432': 1, // MS-SQL / MySQL / PostgreSQL
+  'tcp/6379': 1, 'tcp/27017': 1, 'tcp/9200': 1, 'tcp/9300': 1, // Redis / Mongo / Elastic
+  'tcp/6443': 1, 'tcp/10250': 1, // k8s API / kubelet
+  'tcp/5900': 1,                // VNC
+  'udp/161': 1, 'udp/162': 1,   // SNMP
+  // Tier 3 — obsolete/recon (0.25 each; subtotal rounded UP to next integer)
+  'tcp/1': 0.25, 'udp/1': 0.25, 'tcp/7': 0.25, 'udp/7': 0.25, 'tcp/9': 0.25, 'udp/9': 0.25,
+  'tcp/11': 0.25, 'tcp/13': 0.25, 'udp/13': 0.25, 'tcp/15': 0.25, 'tcp/19': 0.25, 'udp/19': 0.25,
+  'tcp/79': 0.25, 'udp/67': 0.25, 'udp/177': 0.25, 'tcp/515': 0.25, 'udp/517': 0.25, 'udp/518': 0.25,
+  'tcp/540': 0.25, 'tcp/60001': 0.25, 'tcp/1900': 0.25, 'udp/1900': 0.25, 'tcp/5000': 0.25, 'udp/5000': 0.25,
+};
+const BUYBACK_GEO_PER = 6;   // credit per distinct threat-geo destination a matching deny blocks
+const BUYBACK_GEO_CAP = 18;  // max total geo credit
+
+// Recognize a threat-geo destination (blocked country ranges). Matches
+// geography-type objects (address 'geo:CN'/'geo:RU'/'geo:KP') and threat-named
+// groups/objects (RUSSIA/CHINA/KOREA/PROHIBITED/blocked-countries), recursively
+// through groups.
+function isThreatGeoEndpoint(resolved) {
+  if (!resolved) return false;
+  const addr = resolved.address || '';
+  if (/^geo:(cn|ru|kp)/i.test(addr)) return true;
+  const nm = (resolved.name || '') + ' ' + addr;
+  if (/russia|china|korea|prohibit|blocked[-_ ]?countr/i.test(nm)) return true;
+  if (resolved.kind === 'group' && Array.isArray(resolved.members)) {
+    return resolved.members.some(isThreatGeoEndpoint);
+  }
+  return false;
+}
+
+function buybackKeyForCombo(combo) {
+  if (!combo || !combo.protocol || combo.destPort == null) return null;
+  return `${combo.protocol.toLowerCase()}/${combo.destPort}`;
+}
+
+// --- matching primitives (loose, intentionally not a full path/shadow sim) ---
+function intfSetOverlap(a, b) {
+  if (!a || !a.length || a.includes('any')) return true;   // wildcard side
+  if (!b || !b.length || b.includes('any')) return true;
+  return a.some(x => b.includes(x));
+}
+function endpointNamesOf(r) {
+  if (!r) return [];
+  if (r.kind === 'group' && Array.isArray(r.members)) {
+    return r.members.map(m => m && m.name).filter(Boolean);
+  }
+  return r.name ? [r.name] : [];
+}
+// Do two resolved endpoints plausibly overlap? 'any' overlaps anything; else a
+// shared object/group-member name counts. (CIDR overlap is intentionally not
+// computed here — see the no-shadow-analysis note above.)
+function endpointsOverlap(a, b) {
+  if (!a || !b) return false;
+  if (a.kind === 'any' || b.kind === 'any') return true;
+  const an = endpointNamesOf(a), bn = endpointNamesOf(b);
+  return an.some(x => bn.includes(x));
+}
+// Does deny's destination COVER the permit's destination (so the deny carves a
+// port cleanly out of the whole permit, not just a slice)? For a permit to
+// `any`, only a deny to `any` covers it.
+function destCovers(denyDst, permitDst) {
+  if (denyDst && denyDst.kind === 'any') return true;
+  if (permitDst && permitDst.kind === 'any') return false; // deny is a subset of any
+  return endpointsOverlap(denyDst, permitDst);
+}
+
+// records: [{ index, action, enabled, srcintf, dstintf, srcResolved, dstResolved,
+//             services, isAnyPort, isAnyDest }] for the whole rulebase.
+// Returns the buyback for ONE permit record.
+function computeRuleBuyback(permit, records) {
+  const blocked = new Map(); // buyback key -> points (dedup across denies)
+  const geoNames = new Set();
+
+  for (const d of records) {
+    if (d === permit) continue;
+    if (d.action !== 'deny' || !d.enabled) continue;
+    if (d.index >= permit.index) continue;               // must be blocked FIRST
+    if (!intfSetOverlap(d.srcintf, permit.srcintf)) continue;
+    if (!intfSetOverlap(d.dstintf, permit.dstintf)) continue;
+    if (!endpointsOverlap(d.srcResolved, permit.srcResolved)) continue;
+
+    // Port buyback: only meaningful if the permit actually allows a broad port
+    // range (so the high-risk ports are within its scope), and the deny covers
+    // the permit's destination.
+    if (permit.isAnyPort && destCovers(d.dstResolved, permit.dstResolved)) {
+      for (const combo of d.services) {
+        const key = buybackKeyForCombo(combo);
+        if (key && BUYBACK_CREDIT[key] != null) blocked.set(key, BUYBACK_CREDIT[key]);
+      }
+    }
+    // Geo buyback: the deny carves a threat-geo slice out of a broad-destination
+    // permit.
+    if (permit.isAnyDest && isThreatGeoEndpoint(d.dstResolved)) {
+      const label = (d.dstResolved && d.dstResolved.name) || 'threat-geo';
+      geoNames.add(label);
+    }
+  }
+
+  // Sum port credits: integers directly, tier-3 (fractional) subtotal ceil'd.
+  let intSum = 0, fracSum = 0;
+  const blockedPorts = [];
+  for (const [key, pts] of blocked) {
+    if (pts >= 1) intSum += pts; else fracSum += pts;
+    blockedPorts.push({ key, points: pts });
+  }
+  const portCredit = intSum + Math.ceil(fracSum);
+  const geoCredit = Math.min(BUYBACK_GEO_CAP, geoNames.size * BUYBACK_GEO_PER);
+
+  return {
+    credit: portCredit + geoCredit,
+    portCredit,
+    geoCredit,
+    blockedPorts,
+    blockedGeo: Array.from(geoNames),
+  };
+}
+
+// Apply a buyback to an already-scored permit: the credit reduces the score,
+// floored at the exposure score (buyback removes SERVICE/geo risk, never the
+// inherent source-exposure of the rule).
+function applyBuyback(scored, buyback) {
+  const floor = scored.exposure ? scored.exposure.score : 0;
+  const inContext = Math.max(floor, scored.score - buyback.credit);
+  return {
+    inherentScore: scored.score,
+    inContextScore: inContext,
+    inContextBand: riskBand(inContext),
+    buyback,
+  };
+}
+
+// ---- vendor engine: asa ----
+;(function () {
 // ============================================================
 // ASA Config Parser
 // Parses: object network/service, object-group network/service/protocol,
@@ -1107,8 +1376,39 @@ function scopeContainsMultipleHosts(resolvedEndpoint) {
   return resolvedEndpoint.members.length > 1;
 }
 
-// Compute risk for a single ACL entry
-function scoreEntry(config, entry) {
+// Auto-detect firewall role: internet-facing if any interface's security-level
+// classifies as the internet edge (e.g. an outside interface at level 0);
+// otherwise internal segmentation.
+function detectASARole(config) {
+  for (const name of Object.keys(config.interfaces)) {
+    if (trustClassFromLevel(config.interfaces[name].securityLevel) === 'internet') return 'internet-facing';
+  }
+  return 'internal';
+}
+
+// Direction of an ACE from the interface/direction it is applied on. ASA ACLs
+// are bound to an interface + direction rather than a src/dst zone pair, so the
+// applied interface *is* the source zone for an inbound ACL and the destination
+// zone for an outbound one. This mirrors the ASA higher->lower mental model:
+// an inbound ACL on the inside (high-trust) interface is egress-to-internet; an
+// inbound ACL on the outside (internet) interface is ingress.
+function asaDirection(config, ifName, aclDir, role) {
+  if (role === 'internal') return 'internal';
+  const cls = trustClassFromLevel(config.interfaces[ifName] ? config.interfaces[ifName].securityLevel : null);
+  if (aclDir === 'in') { // applied interface is the source zone
+    if (cls === 'internet') return 'ingress';
+    if (cls === 'internal') return 'egress';
+    return 'internal';
+  }
+  // 'out': applied interface is the destination zone
+  if (cls === 'internet') return 'egress';
+  if (cls === 'internal') return 'ingress';
+  return 'internal';
+}
+
+// Compute risk for a single ACL entry, given the traffic `direction`
+// (ingress/egress/internal) inferred from where the ACL is applied.
+function scoreEntry(config, entry, direction) {
   if (entry.remark) return null; // remarks aren't scored
   const logging = classifyLogging(entry);
   if (entry.action !== 'permit') {
@@ -1116,9 +1416,10 @@ function scoreEntry(config, entry) {
       action: entry.action,
       score: 0,
       band: riskBand(0),
-      exposure: { score: 0, label: 'deny' },
+      exposure: { score: 0, label: 'deny', direction },
       service: { score: 0, name: 'n/a' },
       services: [],
+      direction,
       logging,
     };
   }
@@ -1141,7 +1442,7 @@ function scoreEntry(config, entry) {
     if (r.score > worstService.score) worstService = r;
   }
 
-  const exposure = computeExposureScore(srcScope, dstScope, isAnyPort, !!worstService.subnetPenaltyEligible);
+  const exposure = computeExposureScore(srcScope, dstScope, isAnyPort, !!worstService.subnetPenaltyEligible, direction);
   const { combined, subnetPenaltyApplied, subnetPenalty } = combineRisk(
     exposure.score, worstService.score, srcScope, dstScope, !!worstService.subnetPenaltyEligible
   );
@@ -1159,6 +1460,7 @@ function scoreEntry(config, entry) {
     dstResolved,
     srcScope,
     dstScope,
+    direction,
     logging,
   };
 }
@@ -1173,7 +1475,31 @@ function interfaceOrderKey(config, ifName) {
   return { level, name: ifName };
 }
 
-function buildRuleset(config) {
+// Normalized rule record for buyback matching. srcintf/dstintf are left empty
+// (wildcard) because matching is already scoped to a single ACL by the caller,
+// whose ACEs share one applied interface. Services are resolved for denies too,
+// so the matcher can see which ports a deny ACE blocks.
+function asaBuybackRecord(config, entry, index) {
+  const srcResolved = resolveEndpoint(config, entry.src);
+  const dstResolved = resolveEndpoint(config, entry.dst);
+  const services = resolveRuleServices(config, entry);
+  return {
+    index,
+    action: entry.action,
+    enabled: !entry.inactive,
+    srcintf: [],
+    dstintf: [],
+    srcResolved,
+    dstResolved,
+    services,
+    isAnyPort: services.some(c => !c.destPort),
+    isAnyDest: dstResolved.kind === 'any',
+  };
+}
+
+function buildRuleset(config, options) {
+  options = options || {};
+  const role = options.firewallRole || detectASARole(config);
   const rows = [];
 
   // Determine which ACLs are actually applied, and to which interface/direction
@@ -1190,6 +1516,18 @@ function buildRuleset(config) {
 
     const applications = aclApplication[aclName];
 
+    // Buyback matching is scoped to this ACL (its ACEs are evaluated in order,
+    // first-match, on a shared applied interface — so a deny ACE before a broad
+    // permit ACE within the same ACL carves ports/geo out of it). Build records
+    // over the ACL's scored ACEs and compute each permit ACE's buyback credit
+    // (direction-independent), keyed by the entry object.
+    const aceEntries = config.acls[aclName].filter(e => !e.remark);
+    const aclRecords = aceEntries.map((e, i) => asaBuybackRecord(config, e, i));
+    const creditByEntry = new Map();
+    aclRecords.forEach((rec, i) => {
+      if (rec.action === 'permit') creditByEntry.set(aceEntries[i], computeRuleBuyback(rec, aclRecords));
+    });
+
     // Per-ACL sequence number, restarting at 1 for each ACL, in original config order.
     // Inactive ACEs still consume a number (matching "show access-list" / ASDM), so the
     // numbering doesn't shift depending on whether inactive rules are currently shown.
@@ -1203,9 +1541,16 @@ function buildRuleset(config) {
 
       seq += 1;
       const ruleNumber = seq;
-      const scored = scoreEntry(config, entry);
+      const buyback = creditByEntry.get(entry);
+      // Direction (and therefore the score) can differ per application when the
+      // same ACL is bound to multiple interfaces, so score inside the loop.
       for (const app of applications) {
         const orderKey = interfaceOrderKey(config, app.interface);
+        const direction = asaDirection(config, app.interface, app.direction, role);
+        const scored = scoreEntry(config, entry, direction);
+        // Buyback credit is direction-independent; the in-context floor uses this
+        // application's own exposure/score.
+        if (buyback) Object.assign(scored, applyBuyback(scored, buyback));
         rows.push({
           id: ruleId++,
           type: 'rule',
@@ -1334,10 +1679,735 @@ function classifyLogging(entry) {
   };
 }
 
+// ============================================================
+// Vendor detection + registration
+// ============================================================
+// Confidence score that a given config blob is Cisco ASA. Markers are ASA-
+// exclusive grammar; the boot/asdm image lines are especially unambiguous.
+// ui.js compares this against every other registered vendor's detect() and
+// uses the highest scorer, so exact magnitude matters less than being clearly
+// above every non-ASA config's score (which should be ~0 for these markers).
+function detectASAConfig(text) {
+  let score = 0;
+  if (/^\s*access-list\s+\S+\s+(extended|remark)\s/m.test(text)) score += 3;
+  if (/^\s*access-group\s+\S+\s+(in|out)\s+interface\s/m.test(text)) score += 3;
+  if (/^\s*nameif\s+\S+/m.test(text)) score += 2;
+  if (/^\s*security-level\s+\d+/m.test(text)) score += 2;
+  if (/^\s*boot\s+system\s+disk\d+:/m.test(text)) score += 2; // ASA image boot line
+  if (/^\s*asdm\s+image\s+disk\d+:/m.test(text)) score += 2;   // ASDM GUI image line
+  if (/^\s*object\s+network\s+\S+/m.test(text)) score += 1;
+  // FortiOS/other block grammar should never appear in an ASA config; if it
+  // does, this isn't ASA.
+  if (/^\s*config\s+firewall\s+policy\b/m.test(text)) score = 0;
+  return score;
+}
+
+registerVendor({
+  id: 'asa',
+  label: 'Cisco ASA',
+  detect: detectASAConfig,
+  parse: parseASAConfig,
+  buildRuleset: buildRuleset,
+  detectRole: detectASARole,
+});
+
+})();
+// ---- vendor engine: fortios ----
+;(function () {
+// ============================================================
+// FortiOS (FortiGate) Config Parser
+// ============================================================
+// Parses the block grammar of a FortiGate config/backup:
+//   config <path>
+//       edit <name|id>
+//           set <key> <value...>
+//           config <subtable> ... end     (nested; ignored unless needed)
+//       next
+//   end
+//
+// Only the sections relevant to rule-risk analysis are materialized:
+//   system interface, system zone, firewall address, firewall addrgrp,
+//   firewall service custom, firewall service group, firewall policy,
+//   router static. Everything else (replacemsg, certificates, UTM profiles,
+//   NAT, VPN, etc.) is walked past. NAT is intentionally out of scope, per
+//   the project's cross-vendor design decisions.
+//
+// Produces a config shape consumed only by this vendor's resolve.js, plus a
+// top-level `interfaces` map that ui.js reads for its file-info interface
+// count (the one soft field the UI touches directly on the parsed config).
+
+function parseFortiOSConfig(text) {
+  const lines = text.split('\n').map(l => l.replace(/\r$/, ''));
+
+  const config = {
+    vendor: 'fortios',
+    interfaces: {},      // name -> { name, role, type, ip, mask, prefixLen, members, status, isDefaultRouteEgress }
+    zones: {},           // name -> { members: [ifaceName...] }
+    addresses: {},       // name -> { kind, ... }
+    addrgrps: {},        // name -> { members: [name...] }
+    services: {},        // name -> { combos:[...], protocol, raw }
+    serviceGroups: {},   // name -> { members: [name...] }
+    policies: [],        // [ { id, name, srcintf, dstintf, srcaddr, dstaddr, service, action, status, logtraffic, comments } ]
+    staticRoutes: [],    // [ { device, isDefault } ]
+  };
+
+  // Stack of frames. A frame is either:
+  //   { kind: 'config', path: 'firewall policy' }
+  //   { kind: 'edit',   name: 'port1', fields: { key: [values...] } }
+  // Only the fields of the innermost edit frame receive `set` values; the
+  // enclosing config frame's path decides which collection an entry commits to.
+  const stack = [];
+
+  function innerEdit() {
+    for (let k = stack.length - 1; k >= 0; k--) {
+      if (stack[k].kind === 'edit') return stack[k];
+      if (stack[k].kind === 'config') return null; // a config with no open edit above it
+    }
+    return null;
+  }
+  function enclosingConfigPath() {
+    for (let k = stack.length - 1; k >= 0; k--) {
+      if (stack[k].kind === 'config') return stack[k].path;
+    }
+    return null;
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line || line.startsWith('#')) continue;
+
+    let m;
+    if ((m = line.match(/^config\s+(.+)$/))) {
+      stack.push({ kind: 'config', path: m[1].replace(/"/g, '').trim() });
+      continue;
+    }
+    if ((m = line.match(/^edit\s+(.+)$/))) {
+      stack.push({ kind: 'edit', name: unquoteFirst(m[1]), fields: {} });
+      continue;
+    }
+    if (line === 'next') {
+      // pop the innermost edit and commit it to its enclosing config's collection
+      let editFrame = null;
+      while (stack.length && stack[stack.length - 1].kind !== 'edit') stack.pop();
+      if (stack.length) editFrame = stack.pop();
+      if (editFrame) commitEntry(config, enclosingConfigPath(), editFrame.name, editFrame.fields);
+      continue;
+    }
+    if (line === 'end') {
+      // pop back through to and including the innermost config frame
+      while (stack.length && stack[stack.length - 1].kind !== 'config') stack.pop();
+      if (stack.length) stack.pop();
+      continue;
+    }
+    if ((m = line.match(/^set\s+(\S+)\s*(.*)$/))) {
+      const edit = innerEdit();
+      if (edit) edit.fields[m[1]] = splitValues(m[2]);
+      continue;
+    }
+    // unset / append / other directives: ignored for risk analysis
+  }
+
+  // Post-process: mark the egress interface of every default route as the
+  // internet edge (least-trusted). A default route is one with no `set dst`
+  // (dst implicitly 0.0.0.0/0) or an explicit all-zeros/`/0` destination. The
+  // gateway may be dynamic (DHCP/`set dynamic-gateway enable`) with no IP, so
+  // the `device` is the authoritative signal, not any gateway address.
+  for (const route of config.staticRoutes) {
+    if (route.isDefault && route.device && config.interfaces[route.device]) {
+      config.interfaces[route.device].isDefaultRouteEgress = true;
+    }
+  }
+
+  return config;
+}
+
+function commitEntry(config, path, name, fields) {
+  switch (path) {
+    case 'system interface':
+      config.interfaces[name] = buildInterface(name, fields);
+      break;
+    case 'system zone':
+      config.zones[name] = { members: fields.interface || [] };
+      break;
+    case 'firewall address':
+      config.addresses[name] = buildAddress(name, fields);
+      break;
+    case 'firewall addrgrp':
+      config.addrgrps[name] = { members: fields.member || [] };
+      break;
+    case 'firewall service custom':
+      config.services[name] = buildService(name, fields);
+      break;
+    case 'firewall service group':
+      config.serviceGroups[name] = { members: fields.member || [] };
+      break;
+    case 'firewall policy':
+      config.policies.push(buildPolicy(name, fields));
+      break;
+    case 'router static':
+      config.staticRoutes.push(buildRoute(fields));
+      break;
+    default:
+      // section we don't model (certificates, UTM profiles, NAT, etc.) — skip
+      break;
+  }
+}
+
+function buildInterface(name, f) {
+  const iface = {
+    name,
+    role: f.role ? f.role[0] : null,
+    type: f.type ? f.type[0] : null,
+    members: f.member || [],
+    status: f.status ? f.status[0] : 'up',
+    ip: null,
+    mask: null,
+    prefixLen: null,
+    isDefaultRouteEgress: false,
+  };
+  if (f.ip && f.ip.length >= 2) {
+    iface.ip = f.ip[0];
+    iface.mask = f.ip[1];
+    iface.prefixLen = maskToPrefixLen(f.ip[1]);
+  }
+  return iface;
+}
+
+function buildAddress(name, f) {
+  const type = f.type ? f.type[0] : null;
+  if (type === 'iprange') {
+    return { kind: 'range', start: f['start-ip'] ? f['start-ip'][0] : null, end: f['end-ip'] ? f['end-ip'][0] : null, name };
+  }
+  if (type === 'fqdn') {
+    return { kind: 'fqdn', address: f.fqdn ? f.fqdn[0] : name, name };
+  }
+  if (type === 'geography') {
+    return { kind: 'geo', country: f.country ? f.country[0] : '?', name };
+  }
+  if (type === 'wildcard' && f.wildcard) {
+    // wildcard-fqdn / wildcard address: treat as a broad, unresolvable match
+    return { kind: 'wildcard', address: f.wildcard.join(' '), name };
+  }
+  if (f.subnet && f.subnet.length >= 1) {
+    const addr = f.subnet[0];
+    let mask = f.subnet[1] || null;
+    let prefixLen = null;
+    // subnet can be "IP MASK" or "IP/PREFIX"
+    if (addr.includes('/')) {
+      const [a, p] = addr.split('/');
+      return finishSubnet(a, null, /^\d+$/.test(p) ? parseInt(p, 10) : maskToPrefixLen(p), name);
+    }
+    if (mask) prefixLen = mask.includes('.') ? maskToPrefixLen(mask) : (/^\d+$/.test(mask) ? parseInt(mask, 10) : null);
+    return finishSubnet(addr, mask, prefixLen, name);
+  }
+  // No address material at all (e.g. the built-in "all"/"none" stubs, or a
+  // redaction-emptied object). "all" is resolved to `any` in resolve.js by
+  // name; anything else here is an empty/unresolvable object.
+  return { kind: 'empty', name };
+}
+
+function finishSubnet(addr, mask, prefixLen, name) {
+  if (prefixLen === 32) return { kind: 'host', address: addr, name };
+  return { kind: 'subnet', address: addr, mask: mask, prefixLen: prefixLen, name };
+}
+
+function buildService(name, f) {
+  // A FortiOS custom service can carry TCP and/or UDP port ranges, or be an
+  // ICMP / raw-IP-protocol service. Collapse all of that into a flat list of
+  // {protocol, destPort, destPortEnd?, isRange?} combos scored downstream.
+  const combos = [];
+  const proto = f.protocol ? f.protocol[0] : null;
+
+  addPortRanges(combos, 'tcp', f['tcp-portrange']);
+  addPortRanges(combos, 'udp', f['udp-portrange']);
+  addPortRanges(combos, 'sctp', f['sctp-portrange']);
+
+  if (proto === 'ICMP' || proto === 'ICMP6') {
+    combos.push({ protocol: 'icmp', destPort: null });
+  } else if (proto === 'IP') {
+    const num = f['protocol-number'] ? f['protocol-number'][0] : null;
+    combos.push({ protocol: ipProtocolName(num), destPort: null });
+  } else if (proto === 'ALL' && combos.length === 0) {
+    combos.push({ protocol: 'ip', destPort: null }); // all protocols, all ports
+  }
+
+  if (combos.length === 0) {
+    // no recognizable port/proto material — treat as any-port on its stated
+    // protocol, or bare IP if none stated
+    combos.push({ protocol: 'ip', destPort: null });
+  }
+  return { name, combos, protocol: proto };
+}
+
+// Expand a FortiOS portrange field ("53", "88 464", "161-162",
+// "0-65535:0-65535") into {protocol, destPort[, destPortEnd, isRange]} combos.
+// The part after ':' is the SOURCE port range, which we don't score — drop it.
+function addPortRanges(combos, protocol, tokens) {
+  if (!tokens) return;
+  for (const tokRaw of tokens) {
+    const tok = tokRaw.split(':')[0]; // strip src-port range
+    if (!tok) continue;
+    if (tok.includes('-')) {
+      const [loS, hiS] = tok.split('-');
+      const lo = parseInt(loS, 10), hi = parseInt(hiS, 10);
+      if (!isNaN(lo) && !isNaN(hi)) {
+        if (lo <= 1 && hi >= 65535) combos.push({ protocol, destPort: null }); // whole port space = any port
+        else combos.push({ protocol, destPort: lo, destPortEnd: hi, isRange: true });
+        continue;
+      }
+    }
+    if (/^\d+$/.test(tok)) combos.push({ protocol, destPort: tok });
+  }
+}
+
+function ipProtocolName(num) {
+  const map = { '1': 'icmp', '4': 'ipinip', '41': '41', '47': 'gre', '50': 'esp', '51': 'ah', '58': 'icmp' };
+  if (num && map[num]) return map[num];
+  if (num) return 'ip-proto-' + num;
+  return 'ip';
+}
+
+function buildPolicy(id, f) {
+  return {
+    id,
+    name: f.name ? f.name[0] : null,
+    srcintf: f.srcintf || [],
+    dstintf: f.dstintf || [],
+    srcaddr: f.srcaddr || [],
+    dstaddr: f.dstaddr || [],
+    service: f.service || [],
+    // FortiOS policies default to `deny` when `set action` is absent.
+    action: f.action ? f.action[0] : 'deny',
+    // Policies default to enabled; `set status disable` is the inactive marker.
+    status: f.status ? f.status[0] : 'enable',
+    logtraffic: f.logtraffic ? f.logtraffic[0] : null,
+    comments: f.comments ? f.comments[0] : (f.comment ? f.comment[0] : null),
+  };
+}
+
+function buildRoute(f) {
+  const device = f.device ? f.device[0] : null;
+  let isDefault = false;
+  if (!f.dst) {
+    isDefault = true; // no explicit dst => 0.0.0.0/0 default route
+  } else {
+    const dst = f.dst[0];
+    if (dst === '0.0.0.0' && (!f.dst[1] || f.dst[1] === '0.0.0.0')) isDefault = true;
+    else if (dst === '0.0.0.0/0') isDefault = true;
+  }
+  return { device, isDefault };
+}
+
+// Split a FortiOS `set` value string into tokens, honoring double-quoted
+// values that may contain spaces (e.g. `set member "Yaz Wired" "Yaz Wireless"`).
+function splitValues(s) {
+  const out = [];
+  const re = /"([^"]*)"|(\S+)/g;
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    out.push(m[1] !== undefined ? m[1] : m[2]);
+  }
+  return out;
+}
+
+function unquoteFirst(s) {
+  const m = s.match(/^\s*"([^"]*)"|^\s*(\S+)/);
+  if (!m) return s.trim();
+  return m[1] !== undefined ? m[1] : m[2];
+}
+
+// ============================================================
+// FortiOS Resolver: parsed config -> fully-resolved, scored rules
+// ============================================================
+// Translates FortiGate's object model into the shared endpoint/service
+// vocabulary and scores each policy with the vendor-neutral risk engine in
+// shared/risk.js. Emits the same row/scored contract ui.js renders for ASA.
+//
+// Notable FortiOS-vs-ASA differences handled here:
+//  - Default-deny: FortiGate drops inter-zone traffic with no matching policy,
+//    so there is NO implicit-permit synthesis (unlike ASA's higher->lower
+//    default-permit). Only explicit policies are scored.
+//  - Every policy is inherently bound to srcintf/dstintf, so there is no
+//    "unapplied ACL" concept — all policies are enforced unless disabled.
+//  - `set status disable` is the inactive marker (tagged, not dropped).
+//  - Trust for default ordering is derived from routing/role, not a native
+//    numeric security-level (FortiGate has none): the interface that egresses
+//    a default route is the internet edge (least trusted).
+
+// ---- endpoint resolution ----
+
+function fortiResolveAddress(config, name, seen) {
+  seen = seen || new Set();
+  if (name === 'all') return { kind: 'any' };
+  if (name === 'none') return { kind: 'literal', address: 'none', name };
+  if (seen.has(name)) return { kind: 'literal', address: name, cyclic: true, name };
+  seen.add(name);
+
+  const addr = config.addresses[name];
+  if (addr) {
+    switch (addr.kind) {
+      case 'host': return { kind: 'host', address: addr.address, name };
+      case 'subnet': return { kind: 'subnet', address: addr.address, mask: addr.mask, prefixLen: addr.prefixLen, name };
+      case 'range': return { kind: 'range', start: addr.start, end: addr.end, name };
+      case 'fqdn': return { kind: 'fqdn', address: addr.address, name };
+      // Geography and wildcard objects don't map to a concrete CIDR. Render
+      // them as labeled literals (breadth 0). In practice they appear on deny
+      // rules (block-country lists), where exposure isn't scored anyway.
+      case 'geo': return { kind: 'literal', address: 'geo:' + addr.country, name };
+      case 'wildcard': return { kind: 'literal', address: addr.address, name };
+      default: return { kind: 'literal', address: name, unresolved: true, name };
+    }
+  }
+
+  const grp = config.addrgrps[name];
+  if (grp) {
+    return { kind: 'group', name, members: grp.members.map(m => fortiResolveAddress(config, m, seen)) };
+  }
+
+  return { kind: 'literal', address: name, unresolved: true, name };
+}
+
+// A policy's srcaddr/dstaddr is a LIST of address names. Any "all" member makes
+// the whole side `any`; a single member resolves directly; multiple members are
+// an inline group (intentional, curated — no indiscriminate-subnet penalty).
+function fortiResolveEndpointList(config, names) {
+  if (!names || names.length === 0) return { kind: 'any' }; // empty == all in FortiOS
+  if (names.includes('all')) return { kind: 'any' };
+  if (names.length === 1) return fortiResolveAddress(config, names[0]);
+  return { kind: 'group', name: null, members: names.map(n => fortiResolveAddress(config, n)) };
+}
+
+// ---- service resolution ----
+
+function fortiResolveServiceName(config, name, seen) {
+  seen = seen || new Set();
+  if (seen.has(name)) return [];
+  seen.add(name);
+
+  const upper = (name || '').toUpperCase();
+  if (upper === 'ALL') return [{ protocol: 'ip', destPort: null }];
+  if (upper === 'ALL_TCP') return [{ protocol: 'tcp', destPort: null }];
+  if (upper === 'ALL_UDP') return [{ protocol: 'udp', destPort: null }];
+  if (upper === 'ALL_ICMP' || upper === 'ALL_ICMP6') return [{ protocol: 'icmp', destPort: null }];
+  if (upper === 'PING') return [{ protocol: 'icmp', destPort: null }];
+
+  const svc = config.services[name];
+  if (svc) return svc.combos.slice();
+
+  const grp = config.serviceGroups[name];
+  if (grp) {
+    let out = [];
+    for (const mem of grp.members) out = out.concat(fortiResolveServiceName(config, mem, seen));
+    return out;
+  }
+
+  // Unknown/redacted service name — score conservatively as a single unlisted
+  // service rather than assuming any-port.
+  return [{ protocol: 'tcp', destPort: null, unknown: true, name }];
+}
+
+function fortiResolveServices(config, names) {
+  let combos = [];
+  for (const n of names) combos = combos.concat(fortiResolveServiceName(config, n));
+  if (combos.length === 0) combos = [{ protocol: 'ip', destPort: null }];
+  return combos;
+}
+
+// Worst-case service risk across all combos. Extends the shared per-port
+// lookup with range handling: a port range scans the risk table for any
+// flagged port it covers and takes the worst.
+function fortiWorstService(combos) {
+  let worst = { score: 0, name: 'n/a', note: '' };
+  for (const c of combos) {
+    const r = fortiServiceRiskForCombo(c);
+    if (r.score > worst.score) worst = r;
+  }
+  return worst;
+}
+
+function fortiServiceRiskForCombo(combo) {
+  if (combo.isRange && combo.destPort != null && combo.destPortEnd != null) {
+    const lo = parseInt(combo.destPort, 10), hi = parseInt(combo.destPortEnd, 10);
+    let worst = null;
+    for (const key of Object.keys(SERVICE_RISK_TABLE)) {
+      const slash = key.indexOf('/');
+      const proto = key.slice(0, slash);
+      const port = parseInt(key.slice(slash + 1), 10);
+      if (proto === combo.protocol && port >= lo && port <= hi) {
+        const entry = SERVICE_RISK_TABLE[key];
+        if (!worst || entry.score > worst.score) worst = entry;
+      }
+    }
+    if (worst) return worst;
+    return { score: DEFAULT_SERVICE_RISK, name: `${combo.protocol}/${lo}-${hi}`, note: 'Port range, no flagged port inside' };
+  }
+  return lookupServiceRisk(combo.protocol, combo.destPort);
+}
+
+// ---- interface trust (for default ordering only, not the risk model) ----
+
+// Higher = more trusted. The default-route egress interface is the internet
+// edge and always least-trusted; otherwise fall back to `set role`, then to a
+// neutral internal default for untagged interfaces. Zones inherit the minimum
+// trust of their member interfaces.
+function fortiInterfaceTrust(config, ifName, seen) {
+  seen = seen || new Set();
+  if (!ifName || ifName === 'any') return 0; // "any" includes the internet edge
+  if (seen.has(ifName)) return 60;
+  seen.add(ifName);
+
+  const zone = config.zones[ifName];
+  if (zone) {
+    let min = 100;
+    for (const mem of zone.members) min = Math.min(min, fortiInterfaceTrust(config, mem, seen));
+    return zone.members.length ? min : 60;
+  }
+
+  const iface = config.interfaces[ifName];
+  if (!iface) return 30; // referenced but undefined (e.g. redacted) — unknown
+  if (iface.isDefaultRouteEgress) return 0;
+  switch (iface.role) {
+    case 'wan': return 0;
+    case 'dmz': return 50;
+    case 'lan': return 100;
+    default: return 60; // untagged interface: internal-by-default, below explicit lan
+  }
+}
+
+// Trust of a policy's source side = the least-trusted srcintf member (a policy
+// sourced from several interfaces is as exposed as its weakest one).
+function fortiPolicySourceTrust(config, srcintf) {
+  if (!srcintf || srcintf.length === 0) return 60;
+  let min = 100;
+  for (const nm of srcintf) min = Math.min(min, fortiInterfaceTrust(config, nm));
+  return min;
+}
+
+// Zone-trust class for a policy side = class of the least-trusted interface in
+// the list (so a side that includes the internet edge is classed `internet`).
+function fortiZoneClass(config, intfList) {
+  if (!intfList || intfList.length === 0) return trustClassFromLevel(60);
+  let min = 100;
+  for (const nm of intfList) min = Math.min(min, fortiInterfaceTrust(config, nm));
+  return trustClassFromLevel(min);
+}
+
+// Auto-detect firewall role: internet-facing if any interface is a default-route
+// egress (internet edge) or explicitly role wan; otherwise internal segmentation.
+function detectFortiRole(config) {
+  for (const name of Object.keys(config.interfaces)) {
+    const iface = config.interfaces[name];
+    if (iface.isDefaultRouteEgress || iface.role === 'wan') return 'internet-facing';
+  }
+  return 'internal';
+}
+
+// ---- logging classification ----
+// FortiOS grammar: `set logtraffic all | utm | disable` (or absent). `all`
+// logs every session; `utm` logs only sessions that trip a security profile
+// (most allowed traffic goes unlogged); `disable`/absent means no per-session
+// logging. Same {flagged, severity, label, detail} contract as ASA, with the
+// same deny>permit severity asymmetry for un-logged rules.
+function fortiClassifyLogging(policy) {
+  const isDeny = (policy.action !== 'accept');
+  const lt = policy.logtraffic;
+
+  if (lt === 'all') {
+    return { flagged: false, severity: 'none', label: 'All sessions', detail: "'set logtraffic all' — every session matching this policy is logged." };
+  }
+  if (lt === 'utm') {
+    return {
+      flagged: true,
+      severity: isDeny ? 'high' : 'medium',
+      label: 'UTM only',
+      detail: "'set logtraffic utm' — only sessions that trigger a security profile are logged; ordinary allowed traffic is not.",
+    };
+  }
+  if (lt === 'disable') {
+    return {
+      flagged: true,
+      severity: isDeny ? 'high' : 'medium',
+      label: 'Logging disabled',
+      detail: isDeny
+        ? "'set logtraffic disable' — denied traffic (possible recon/attack) generates no log."
+        : "'set logtraffic disable' — this policy generates no session log.",
+    };
+  }
+  // absent
+  return {
+    flagged: true,
+    severity: isDeny ? 'high' : 'medium',
+    label: 'No logging',
+    detail: isDeny
+      ? 'No logtraffic set — denied traffic (possible recon/attack) is not logged.'
+      : 'No logtraffic set — this policy has no explicit session logging.',
+  };
+}
+
+// ---- scoring ----
+
+function fortiScorePolicy(config, policy, role) {
+  const logging = fortiClassifyLogging(policy);
+  const action = policy.action === 'accept' ? 'permit' : 'deny';
+
+  const srcClass = fortiZoneClass(config, policy.srcintf);
+  const dstClass = fortiZoneClass(config, policy.dstintf);
+  const direction = ruleDirection(srcClass, dstClass, role);
+
+  if (action !== 'permit') {
+    return {
+      action,
+      score: 0,
+      band: riskBand(0),
+      exposure: { score: 0, label: 'deny', direction },
+      service: { score: 0, name: 'n/a' },
+      subnetPenaltyApplied: false,
+      subnetPenalty: 0,
+      // Resolve the deny's services/dest even though it isn't scored — the
+      // buyback matcher needs to know what ports/destinations this deny blocks.
+      services: fortiResolveServices(config, policy.service),
+      srcResolved: fortiResolveEndpointList(config, policy.srcaddr),
+      dstResolved: fortiResolveEndpointList(config, policy.dstaddr),
+      srcScope: { kind: 'unknown' },
+      dstScope: { kind: 'unknown' },
+      srcClass,
+      dstClass,
+      direction,
+      logging,
+    };
+  }
+
+  const srcResolved = fortiResolveEndpointList(config, policy.srcaddr);
+  const dstResolved = fortiResolveEndpointList(config, policy.dstaddr);
+  const srcScope = classifyEndpointScope(srcResolved);
+  const dstScope = classifyEndpointScope(dstResolved);
+
+  const serviceCombos = fortiResolveServices(config, policy.service);
+  const isAnyPort = serviceCombos.some(c => !c.destPort);
+  const worstService = fortiWorstService(serviceCombos);
+
+  const exposure = computeExposureScore(srcScope, dstScope, isAnyPort, !!worstService.subnetPenaltyEligible, direction);
+  const { combined, subnetPenaltyApplied, subnetPenalty } = combineRisk(
+    exposure.score, worstService.score, srcScope, dstScope, !!worstService.subnetPenaltyEligible
+  );
+
+  return {
+    action,
+    score: combined,
+    band: riskBand(combined),
+    exposure,
+    service: worstService,
+    subnetPenaltyApplied,
+    subnetPenalty,
+    services: serviceCombos,
+    srcResolved,
+    dstResolved,
+    srcScope,
+    dstScope,
+    srcClass,
+    dstClass,
+    direction,
+    logging,
+  };
+}
+
+// ---- ruleset assembly ----
+
+function fortiBuildRuleset(config, options) {
+  options = options || {};
+  const role = options.firewallRole || detectFortiRole(config);
+
+  // Pass 1: score every policy in evaluation order.
+  const scoredList = config.policies.map(policy => ({
+    policy,
+    scored: fortiScorePolicy(config, policy, role),
+  }));
+
+  // Pass 2: buyback matching over the whole rulebase (needs every rule, incl.
+  // denies). Build normalized records, then credit each permit for high-risk
+  // ports / threat-geo destinations carved out by preceding enabled denies.
+  const records = scoredList.map((e, i) => ({
+    index: i,
+    action: e.scored.action,
+    enabled: e.policy.status !== 'disable',
+    srcintf: e.policy.srcintf,
+    dstintf: e.policy.dstintf,
+    srcResolved: e.scored.srcResolved,
+    dstResolved: e.scored.dstResolved,
+    services: e.scored.services,
+    isAnyPort: e.scored.services.some(c => !c.destPort),
+    isAnyDest: !!(e.scored.dstResolved && e.scored.dstResolved.kind === 'any'),
+  }));
+  scoredList.forEach((e, i) => {
+    if (e.scored.action === 'permit') {
+      Object.assign(e.scored, applyBuyback(e.scored, computeRuleBuyback(records[i], records)));
+    }
+  });
+
+  // Pass 3: assemble display rows.
+  const rows = [];
+  let ruleId = 0;
+  let seq = 0;
+  for (const e of scoredList) {
+    const policy = e.policy;
+    seq += 1; // evaluation order (position in the policy table)
+    const srcLabel = (policy.srcintf && policy.srcintf.length) ? policy.srcintf.join('/') : 'any';
+    const dstLabel = (policy.dstintf && policy.dstintf.length) ? policy.dstintf.join('/') : 'any';
+    const trust = fortiPolicySourceTrust(config, policy.srcintf);
+
+    rows.push({
+      id: ruleId++,
+      type: 'rule',
+      aclName: policy.name || null,
+      ruleNumber: policy.id,        // FortiGate policy ID — the canonical reference
+      entry: policy,
+      scored: e.scored,
+      interface: `${srcLabel} → ${dstLabel}`,
+      direction: 'policy',
+      implicit: false,
+      inactive: policy.status === 'disable',
+      // Sort most-trusted source first, then srcintf name, then evaluation order.
+      defaultOrder: { level: trust, ifName: (policy.srcintf && policy.srcintf[0]) || '', ruleNumber: seq },
+    });
+  }
+
+  return rows;
+}
+
+// ============================================================
+// Vendor detection + registration
+// ============================================================
+// Confidence that a config blob is FortiOS. The `#config-version=FGT...`
+// header and `config firewall policy` block are unambiguous FortiGate tells;
+// ASA grammar never appears in a FortiGate backup.
+function detectFortiOSConfig(text) {
+  let score = 0;
+  if (/^#config-version=/m.test(text)) score += 3;
+  if (/^\s*config\s+firewall\s+policy\b/m.test(text)) score += 3;
+  if (/^\s*config\s+system\s+interface\b/m.test(text)) score += 2;
+  if (/^\s*set\s+(srcintf|dstintf)\s+/m.test(text)) score += 2;
+  if (/^\s*config\s+firewall\s+(address|addrgrp|service custom)\b/m.test(text)) score += 1;
+  // ASA grammar would mean this isn't FortiOS.
+  if (/^\s*access-list\s+\S+\s+extended\s/m.test(text)) score = 0;
+  return score;
+}
+
+registerVendor({
+  id: 'fortios',
+  label: 'Fortinet FortiOS',
+  detect: detectFortiOSConfig,
+  parse: parseFortiOSConfig,
+  buildRuleset: fortiBuildRuleset,
+  detectRole: detectFortiRole,
+});
+
+})();
 </script>
 <script id="ui-script">
 (function () {
   let CONFIG = null;
+  let CURRENT_VENDOR = null;
+  let CURRENT_ROLE = 'internet-facing';
   let ROWS = [];
   let EXPANDED = new Set();
   let sortKey = 'default';
@@ -1359,6 +2429,7 @@ function classifyLogging(entry) {
   const filterImplicit = document.getElementById('filterImplicit');
   const filterLogging = document.getElementById('filterLogging');
   const showInactiveToggle = document.getElementById('showInactiveToggle');
+  const roleSelect = document.getElementById('roleSelect');
   const searchBox = document.getElementById('searchBox');
   const footerNote = document.getElementById('footerNote');
   const fileInfoName = document.getElementById('fileInfoName');
@@ -1410,16 +2481,24 @@ function classifyLogging(entry) {
     fileInfoName.textContent = file.name;
     fileInfoName.title = file.name;
     const parts = [];
+    if (CURRENT_VENDOR) parts.push(CURRENT_VENDOR.label);
     if (typeof file.size === 'number') parts.push(formatFileSize(file.size));
-    const ifaceCount = Object.keys(config.interfaces).length;
+    const ifaceCount = Object.keys(config.interfaces || {}).length;
     parts.push(`${ifaceCount} interface${ifaceCount === 1 ? '' : 's'}`);
     parts.push(`${ruleCount} rule${ruleCount === 1 ? '' : 's'} analyzed`);
     fileInfoSub.innerHTML = parts.map(p => escapeHtml(p)).join('<span class="sep">&middot;</span>');
   }
 
   function processConfig(text, file) {
-    CONFIG = parseASAConfig(text);
-    ROWS = buildRuleset(CONFIG);
+    const vendor = detectVendor(text);
+    if (!vendor) {
+      throw new Error('Could not recognize this file as a supported firewall config (Cisco ASA or FortiOS/FortiGate).');
+    }
+    CURRENT_VENDOR = vendor;
+    CONFIG = vendor.parse(text);
+    CURRENT_ROLE = vendor.detectRole ? vendor.detectRole(CONFIG) : 'internet-facing';
+    if (roleSelect) roleSelect.value = CURRENT_ROLE;
+    ROWS = vendor.buildRuleset(CONFIG, { firewallRole: CURRENT_ROLE });
     EXPANDED = new Set();
     sortKey = 'default';
     sortDir = 'asc';
@@ -1495,6 +2574,19 @@ function classifyLogging(entry) {
   filterAction.addEventListener('change', renderTable);
   filterImplicit.addEventListener('change', renderTable);
   filterLogging.addEventListener('change', renderTable);
+  if (roleSelect) {
+    // Changing the firewall role re-scores every rule (direction-aware
+    // exposure), so rebuild the ruleset from the already-parsed config and
+    // re-render — no re-parse needed.
+    roleSelect.addEventListener('change', () => {
+      if (!CONFIG || !CURRENT_VENDOR) return;
+      CURRENT_ROLE = roleSelect.value;
+      ROWS = CURRENT_VENDOR.buildRuleset(CONFIG, { firewallRole: CURRENT_ROLE });
+      EXPANDED = new Set();
+      renderSummary();
+      renderTable();
+    });
+  }
   searchBox.addEventListener('input', debounce(renderTable, 150));
   if (showInactiveToggle) {
     showInactiveToggle.addEventListener('change', () => {
@@ -1516,7 +2608,9 @@ function classifyLogging(entry) {
       case 'subnet': return `${resolved.address}/${resolved.prefixLen ?? '?'}` + (resolved.name ? ` (${resolved.name})` : '');
       case 'range': return `${resolved.start}\u2013${resolved.end}`;
       case 'fqdn': return resolved.address;
-      case 'group': return `${resolved.name} [${resolved.members.length} members]`;
+      case 'group': return resolved.name
+        ? `${resolved.name} [${resolved.members.length} members]`
+        : `${resolved.members.length} addresses`;
       case 'literal': return resolved.address;
       default: return '?';
     }
@@ -1629,7 +2723,7 @@ function classifyLogging(entry) {
       <td class="mono rule-number">${row.ruleNumber ?? '\u2014'}</td>
       <td class="risk-cell">
         <div class="risk-bar-wrap">
-          <span class="risk-num" style="color:${band.color}">${s.score}</span>
+          <span class="risk-num" style="color:${band.color}">${s.score}</span>${s.buyback && s.buyback.credit > 0 ? `<span class="buyback-tag" title="Compensating controls in the rulebase reduce this to ${s.inContextScore} in-context (−${s.buyback.credit}). Expand for detail.">→ ${s.inContextScore}</span>` : ''}
         </div>
         <div class="risk-band-pill" style="background:${band.color}22; color:${band.color}; border:1px solid ${band.color}55;">${band.label}</div>
       </td>
@@ -1692,7 +2786,22 @@ function classifyLogging(entry) {
     html += `<div class="row"><span class="k">Service risk (worst-case port/protocol)</span><span>${escapeHtml(s.service.name)} \u2014 ${s.service.score}</span></div>`;
     if (s.service.note) html += `<div class="row"><span class="k" style="font-style:italic;">note</span><span style="font-style:italic;">${escapeHtml(s.service.note)}</span></div>`;
     html += `<div class="row"><span class="k">Combine</span><span>exposure + service − (exposure × service ⁄ 100)${s.subnetPenaltyApplied ? ` + ${s.subnetPenalty} (indiscriminate subnet penalty)` : ''}</span></div>`;
-    html += `<div class="row total"><span class="k">Final score</span><span style="color:${s.band.color}">${s.score} / 100 \u2014 ${s.band.label}</span></div>`;
+    html += `<div class="row total"><span class="k">Inherent score</span><span style="color:${s.band.color}">${s.score} / 100 \u2014 ${s.band.label}</span></div>`;
+    // Buyback / hardening credit (in-context score) \u2014 only when a preceding
+    // matching deny carves high-risk ports or threat-geo out of this permit.
+    if (s.buyback && s.buyback.credit > 0) {
+      const parts = [];
+      if (s.buyback.blockedPorts && s.buyback.blockedPorts.length) {
+        parts.push('ports ' + s.buyback.blockedPorts.map(p => escapeHtml(p.key)).join(', ') + ` (\u2212${s.buyback.portCredit})`);
+      }
+      if (s.buyback.blockedGeo && s.buyback.blockedGeo.length) {
+        parts.push(`${s.buyback.blockedGeo.length} threat-geo block${s.buyback.blockedGeo.length === 1 ? '' : 's'} (\u2212${s.buyback.geoCredit})`);
+      }
+      html += `<div class="row"><span class="k">Hardening buyback (compensating controls)</span><span>\u2212${s.buyback.credit}: ${parts.join('; ')}</span></div>`;
+      const icBand = s.inContextBand || s.band;
+      html += `<div class="row total"><span class="k">In-context score</span><span style="color:${icBand.color}">${s.inContextScore} / 100 \u2014 ${icBand.label}</span></div>`;
+      html += `<div class="row" style="font-style:italic; color:var(--text-dim);"><span class="k"></span><span>credit reflects that a matching block exists and precedes this rule; rule-order effectiveness (shadowing) is not verified</span></div>`;
+    }
     html += `<div class="row" style="margin-top:6px; padding-top:6px; border-top:1px solid var(--border-soft);"><span class="k">Logging</span><span style="${s.logging.flagged ? 'color:' + (s.logging.severity === 'high' ? 'var(--c-critical)' : 'var(--c-high)') : ''}">${escapeHtml(s.logging.label)}</span></div>`;
     html += '</div></div>';
 
@@ -1713,7 +2822,8 @@ function classifyLogging(entry) {
     if (resolved.kind === 'fqdn') return `<span class="tag">fqdn</span> ${escapeHtml(resolved.address)}`;
     if (resolved.kind === 'literal') return `<span class="tag">${resolved.unresolved ? 'unresolved' : 'literal'}</span> ${escapeHtml(resolved.address)}`;
     if (resolved.kind === 'group') {
-      let out = `<span class="tag">group</span> ${escapeHtml(resolved.name)} <ul>`;
+      const groupLabel = resolved.name ? escapeHtml(resolved.name) : `<em>${resolved.members.length} addresses</em>`;
+      let out = `<span class="tag">group</span> ${groupLabel} <ul>`;
       for (const mem of resolved.members) {
         out += `<li>${renderMemberTree(mem, depth + 1)}</li>`;
       }

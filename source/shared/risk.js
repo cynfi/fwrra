@@ -244,6 +244,35 @@ function effectiveBreadth(scope, eligible) {
   return scope.breadth;
 }
 
+// --- Zone-trust classes & rule direction (DESIGN.md §3) ---
+//
+// Each vendor reduces an interface/zone to a normalized 0-100 trust ordinal
+// (higher = more trusted): ASA's native security-level, FortiOS's
+// default-route/role-derived level, etc. trustClassFromLevel() buckets that
+// into the three governance classes the direction model and the (upcoming)
+// policy-standards layer share. Only the `internet` class actually drives
+// direction; the dmz/internal split matters for policy standards.
+function trustClassFromLevel(level) {
+  if (level === null || level === undefined) return 'unknown';
+  if (level <= 15) return 'internet';   // wan / outside / default-route egress
+  if (level >= 60) return 'internal';   // lan / inside / untagged-internal
+  return 'dmz';
+}
+
+// Direction of a rule from its source/destination zone classes, honoring the
+// firewall role. On an `internal` (segmentation) firewall there is no internet
+// edge, so everything is treated as `internal` (symmetric blend, broad-outbound
+// penalized). On an `internet-facing` firewall, a rule whose destination is the
+// internet is `egress` (outbound-to-internet is the expected baseline — scored
+// on source breadth, not the expected-broad destination); a rule sourced from
+// the internet is `ingress` (the dangerous direction, scored as before).
+function ruleDirection(srcClass, dstClass, role) {
+  if (role === 'internal') return 'internal';
+  if (dstClass === 'internet' && srcClass !== 'internet') return 'egress';
+  if (srcClass === 'internet') return 'ingress';
+  return 'internal';
+}
+
 // Exposure score from src/dst breadth. The broader side dominates (weight
 // 0.75) but the narrower side still contributes (weight 0.25), so "any" on
 // one side alone doesn't automatically saturate to the same score as "any on
@@ -252,20 +281,49 @@ function effectiveBreadth(scope, eligible) {
 // continuous formula covering every src/dst kind pairing, replacing the old
 // per-combination bucket tables (which had a monotonicity bug where a /24
 // destination could score *below* a single-host destination).
+//
+// `direction` (DESIGN.md §3) makes egress special: on an internet-facing
+// firewall a broad/`any` DESTINATION on an outbound rule is the expected
+// baseline (reaching the internet is the box's job), so egress exposure is
+// driven by how broad the SOURCE is, not the destination. The unrestricted-
+// ports risk of a "service any" egress rule is carried by the service score in
+// combineRisk(), so egress does NOT also take the any-port breadth bump (that
+// would double-count). ingress/internal keep the original symmetric blend.
 const BREADTH_WEIGHT_MAJOR = 0.75;
 const BREADTH_WEIGHT_MINOR = 0.25;
 const ANY_PORT_BREADTH_BUMP = 15;
+// Egress exposure weight on source breadth, ranging from EGRESS_MIN (narrow
+// destination) to EGRESS_MIN+EGRESS_SPAN (broad/any destination). Capped at 0.5
+// so egress exposure tops out at 50 and the SERVICE score dominates the
+// combined result — for outbound rules, *what* may leave matters more than how
+// many hosts may initiate it.
+const EGRESS_SRC_WEIGHT_MIN = 0.25;
+const EGRESS_SRC_WEIGHT_SPAN = 0.25;
 
-function computeExposureScore(srcScope, dstScope, isAnyPort, subnetPenaltyEligible) {
+function computeExposureScore(srcScope, dstScope, isAnyPort, subnetPenaltyEligible, direction) {
   const srcBreadth = effectiveBreadth(srcScope, subnetPenaltyEligible);
   const dstBreadth = effectiveBreadth(dstScope, subnetPenaltyEligible);
-  const hi = Math.max(srcBreadth, dstBreadth);
-  const lo = Math.min(srcBreadth, dstBreadth);
-  let score = hi * BREADTH_WEIGHT_MAJOR + lo * BREADTH_WEIGHT_MINOR;
-  if (isAnyPort) score = Math.min(100, score + ANY_PORT_BREADTH_BUMP);
+  let score, label;
+  if (direction === 'egress') {
+    // Outbound to the internet. A broad/any DESTINATION is the expected baseline
+    // (reaching the internet is the box's job) and is NOT penalized — but a
+    // NARROW destination is genuine least-privilege (e.g. egress restricted to
+    // named resolvers) and reduces risk. Source breadth (how many internal
+    // hosts may egress) is the primary exposure axis; the any-port bump is
+    // skipped because the service score already carries the "what may leave"
+    // risk in combineRisk().
+    const srcWeight = EGRESS_SRC_WEIGHT_MIN + EGRESS_SRC_WEIGHT_SPAN * (dstBreadth / 100);
+    score = srcBreadth * srcWeight;
+    label = `${scopeLabel(srcScope)} → ${scopeLabel(dstScope)} (egress)`;
+  } else {
+    const hi = Math.max(srcBreadth, dstBreadth);
+    const lo = Math.min(srcBreadth, dstBreadth);
+    score = hi * BREADTH_WEIGHT_MAJOR + lo * BREADTH_WEIGHT_MINOR;
+    if (isAnyPort) score = Math.min(100, score + ANY_PORT_BREADTH_BUMP);
+    label = `${scopeLabel(srcScope)} ↔ ${scopeLabel(dstScope)}`;
+  }
   score = Math.round(Math.min(100, score));
-  const label = `${scopeLabel(srcScope)} ↔ ${scopeLabel(dstScope)}`;
-  return { score, label };
+  return { score, label, direction: direction || 'internal' };
 }
 
 // Combine exposure + service risk via a "noisy-OR": combined = e + s - e*s/100.
@@ -294,4 +352,163 @@ function riskBand(score) {
   if (score >= 35) return { label: 'Medium', color: '#eab308' };
   if (score >= 1) return { label: 'Low', color: '#22c55e' };
   return { label: 'None', color: '#4b5563' };
+}
+
+// ============================================================
+// Buyback / hardening credit (DESIGN.md §4)
+// ============================================================
+// A broad permit is less risky when the rulebase first carves the dangerous
+// slices out of it. When a preceding, enabled, matching DENY blocks a high-risk
+// port (or a threat-geo destination) that a broad permit would otherwise allow,
+// the permit earns "buyback" credit that reduces its in-context score. This is
+// rulebase-level *matching* (needs the whole ordered list) whose result lands on
+// the individual broad rule. Shadow analysis is deliberately out of scope — we
+// credit that a matching block exists and precedes the permit; we do NOT verify
+// it isn't itself shadowed by an earlier broader permit (that's a policy-analysis
+// tool's job). The per-port weights are the real-world value of blocking the
+// port at an edge, NOT the raw service-risk score (obsolete ports whose inherent
+// score overstates present-day relevance are discounted). Tunable, like the
+// subnet-penalty set.
+const BUYBACK_CREDIT = {
+  // Tier 1 — top-value edge blocks
+  'tcp/445': 5,                 // SMB
+  'tcp/2375': 4,                // Docker API (no TLS) — root on the host
+  'tcp/12345': 4, 'tcp/12346': 4, // NetBus backdoor
+  'tcp/21': 4, 'tcp/20': 4,     // FTP / FTP-DATA
+  'tcp/22': 3,                  // SSH
+  'tcp/3389': 3,                // RDP
+  'udp/69': 3,                  // TFTP
+  'tcp/23': 2,                  // Telnet
+  // Tier 2 — mid value (1 each)
+  'tcp/139': 1,                 // NetBIOS-SSN
+  'tcp/512': 1,                 // rexec
+  'tcp/1433': 1, 'tcp/3306': 1, 'tcp/5432': 1, // MS-SQL / MySQL / PostgreSQL
+  'tcp/6379': 1, 'tcp/27017': 1, 'tcp/9200': 1, 'tcp/9300': 1, // Redis / Mongo / Elastic
+  'tcp/6443': 1, 'tcp/10250': 1, // k8s API / kubelet
+  'tcp/5900': 1,                // VNC
+  'udp/161': 1, 'udp/162': 1,   // SNMP
+  // Tier 3 — obsolete/recon (0.25 each; subtotal rounded UP to next integer)
+  'tcp/1': 0.25, 'udp/1': 0.25, 'tcp/7': 0.25, 'udp/7': 0.25, 'tcp/9': 0.25, 'udp/9': 0.25,
+  'tcp/11': 0.25, 'tcp/13': 0.25, 'udp/13': 0.25, 'tcp/15': 0.25, 'tcp/19': 0.25, 'udp/19': 0.25,
+  'tcp/79': 0.25, 'udp/67': 0.25, 'udp/177': 0.25, 'tcp/515': 0.25, 'udp/517': 0.25, 'udp/518': 0.25,
+  'tcp/540': 0.25, 'tcp/60001': 0.25, 'tcp/1900': 0.25, 'udp/1900': 0.25, 'tcp/5000': 0.25, 'udp/5000': 0.25,
+};
+const BUYBACK_GEO_PER = 6;   // credit per distinct threat-geo destination a matching deny blocks
+const BUYBACK_GEO_CAP = 18;  // max total geo credit
+
+// Recognize a threat-geo destination (blocked country ranges). Matches
+// geography-type objects (address 'geo:CN'/'geo:RU'/'geo:KP') and threat-named
+// groups/objects (RUSSIA/CHINA/KOREA/PROHIBITED/blocked-countries), recursively
+// through groups.
+function isThreatGeoEndpoint(resolved) {
+  if (!resolved) return false;
+  const addr = resolved.address || '';
+  if (/^geo:(cn|ru|kp)/i.test(addr)) return true;
+  const nm = (resolved.name || '') + ' ' + addr;
+  if (/russia|china|korea|prohibit|blocked[-_ ]?countr/i.test(nm)) return true;
+  if (resolved.kind === 'group' && Array.isArray(resolved.members)) {
+    return resolved.members.some(isThreatGeoEndpoint);
+  }
+  return false;
+}
+
+function buybackKeyForCombo(combo) {
+  if (!combo || !combo.protocol || combo.destPort == null) return null;
+  return `${combo.protocol.toLowerCase()}/${combo.destPort}`;
+}
+
+// --- matching primitives (loose, intentionally not a full path/shadow sim) ---
+function intfSetOverlap(a, b) {
+  if (!a || !a.length || a.includes('any')) return true;   // wildcard side
+  if (!b || !b.length || b.includes('any')) return true;
+  return a.some(x => b.includes(x));
+}
+function endpointNamesOf(r) {
+  if (!r) return [];
+  if (r.kind === 'group' && Array.isArray(r.members)) {
+    return r.members.map(m => m && m.name).filter(Boolean);
+  }
+  return r.name ? [r.name] : [];
+}
+// Do two resolved endpoints plausibly overlap? 'any' overlaps anything; else a
+// shared object/group-member name counts. (CIDR overlap is intentionally not
+// computed here — see the no-shadow-analysis note above.)
+function endpointsOverlap(a, b) {
+  if (!a || !b) return false;
+  if (a.kind === 'any' || b.kind === 'any') return true;
+  const an = endpointNamesOf(a), bn = endpointNamesOf(b);
+  return an.some(x => bn.includes(x));
+}
+// Does deny's destination COVER the permit's destination (so the deny carves a
+// port cleanly out of the whole permit, not just a slice)? For a permit to
+// `any`, only a deny to `any` covers it.
+function destCovers(denyDst, permitDst) {
+  if (denyDst && denyDst.kind === 'any') return true;
+  if (permitDst && permitDst.kind === 'any') return false; // deny is a subset of any
+  return endpointsOverlap(denyDst, permitDst);
+}
+
+// records: [{ index, action, enabled, srcintf, dstintf, srcResolved, dstResolved,
+//             services, isAnyPort, isAnyDest }] for the whole rulebase.
+// Returns the buyback for ONE permit record.
+function computeRuleBuyback(permit, records) {
+  const blocked = new Map(); // buyback key -> points (dedup across denies)
+  const geoNames = new Set();
+
+  for (const d of records) {
+    if (d === permit) continue;
+    if (d.action !== 'deny' || !d.enabled) continue;
+    if (d.index >= permit.index) continue;               // must be blocked FIRST
+    if (!intfSetOverlap(d.srcintf, permit.srcintf)) continue;
+    if (!intfSetOverlap(d.dstintf, permit.dstintf)) continue;
+    if (!endpointsOverlap(d.srcResolved, permit.srcResolved)) continue;
+
+    // Port buyback: only meaningful if the permit actually allows a broad port
+    // range (so the high-risk ports are within its scope), and the deny covers
+    // the permit's destination.
+    if (permit.isAnyPort && destCovers(d.dstResolved, permit.dstResolved)) {
+      for (const combo of d.services) {
+        const key = buybackKeyForCombo(combo);
+        if (key && BUYBACK_CREDIT[key] != null) blocked.set(key, BUYBACK_CREDIT[key]);
+      }
+    }
+    // Geo buyback: the deny carves a threat-geo slice out of a broad-destination
+    // permit.
+    if (permit.isAnyDest && isThreatGeoEndpoint(d.dstResolved)) {
+      const label = (d.dstResolved && d.dstResolved.name) || 'threat-geo';
+      geoNames.add(label);
+    }
+  }
+
+  // Sum port credits: integers directly, tier-3 (fractional) subtotal ceil'd.
+  let intSum = 0, fracSum = 0;
+  const blockedPorts = [];
+  for (const [key, pts] of blocked) {
+    if (pts >= 1) intSum += pts; else fracSum += pts;
+    blockedPorts.push({ key, points: pts });
+  }
+  const portCredit = intSum + Math.ceil(fracSum);
+  const geoCredit = Math.min(BUYBACK_GEO_CAP, geoNames.size * BUYBACK_GEO_PER);
+
+  return {
+    credit: portCredit + geoCredit,
+    portCredit,
+    geoCredit,
+    blockedPorts,
+    blockedGeo: Array.from(geoNames),
+  };
+}
+
+// Apply a buyback to an already-scored permit: the credit reduces the score,
+// floored at the exposure score (buyback removes SERVICE/geo risk, never the
+// inherent source-exposure of the rule).
+function applyBuyback(scored, buyback) {
+  const floor = scored.exposure ? scored.exposure.score : 0;
+  const inContext = Math.max(floor, scored.score - buyback.credit);
+  return {
+    inherentScore: scored.score,
+    inContextScore: inContext,
+    inContextBand: riskBand(inContext),
+    buyback,
+  };
 }

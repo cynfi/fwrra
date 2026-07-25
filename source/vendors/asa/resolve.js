@@ -124,8 +124,39 @@ function scopeContainsMultipleHosts(resolvedEndpoint) {
   return resolvedEndpoint.members.length > 1;
 }
 
-// Compute risk for a single ACL entry
-function scoreEntry(config, entry) {
+// Auto-detect firewall role: internet-facing if any interface's security-level
+// classifies as the internet edge (e.g. an outside interface at level 0);
+// otherwise internal segmentation.
+function detectASARole(config) {
+  for (const name of Object.keys(config.interfaces)) {
+    if (trustClassFromLevel(config.interfaces[name].securityLevel) === 'internet') return 'internet-facing';
+  }
+  return 'internal';
+}
+
+// Direction of an ACE from the interface/direction it is applied on. ASA ACLs
+// are bound to an interface + direction rather than a src/dst zone pair, so the
+// applied interface *is* the source zone for an inbound ACL and the destination
+// zone for an outbound one. This mirrors the ASA higher->lower mental model:
+// an inbound ACL on the inside (high-trust) interface is egress-to-internet; an
+// inbound ACL on the outside (internet) interface is ingress.
+function asaDirection(config, ifName, aclDir, role) {
+  if (role === 'internal') return 'internal';
+  const cls = trustClassFromLevel(config.interfaces[ifName] ? config.interfaces[ifName].securityLevel : null);
+  if (aclDir === 'in') { // applied interface is the source zone
+    if (cls === 'internet') return 'ingress';
+    if (cls === 'internal') return 'egress';
+    return 'internal';
+  }
+  // 'out': applied interface is the destination zone
+  if (cls === 'internet') return 'egress';
+  if (cls === 'internal') return 'ingress';
+  return 'internal';
+}
+
+// Compute risk for a single ACL entry, given the traffic `direction`
+// (ingress/egress/internal) inferred from where the ACL is applied.
+function scoreEntry(config, entry, direction) {
   if (entry.remark) return null; // remarks aren't scored
   const logging = classifyLogging(entry);
   if (entry.action !== 'permit') {
@@ -133,9 +164,10 @@ function scoreEntry(config, entry) {
       action: entry.action,
       score: 0,
       band: riskBand(0),
-      exposure: { score: 0, label: 'deny' },
+      exposure: { score: 0, label: 'deny', direction },
       service: { score: 0, name: 'n/a' },
       services: [],
+      direction,
       logging,
     };
   }
@@ -158,7 +190,7 @@ function scoreEntry(config, entry) {
     if (r.score > worstService.score) worstService = r;
   }
 
-  const exposure = computeExposureScore(srcScope, dstScope, isAnyPort, !!worstService.subnetPenaltyEligible);
+  const exposure = computeExposureScore(srcScope, dstScope, isAnyPort, !!worstService.subnetPenaltyEligible, direction);
   const { combined, subnetPenaltyApplied, subnetPenalty } = combineRisk(
     exposure.score, worstService.score, srcScope, dstScope, !!worstService.subnetPenaltyEligible
   );
@@ -176,6 +208,7 @@ function scoreEntry(config, entry) {
     dstResolved,
     srcScope,
     dstScope,
+    direction,
     logging,
   };
 }
@@ -190,7 +223,31 @@ function interfaceOrderKey(config, ifName) {
   return { level, name: ifName };
 }
 
-function buildRuleset(config) {
+// Normalized rule record for buyback matching. srcintf/dstintf are left empty
+// (wildcard) because matching is already scoped to a single ACL by the caller,
+// whose ACEs share one applied interface. Services are resolved for denies too,
+// so the matcher can see which ports a deny ACE blocks.
+function asaBuybackRecord(config, entry, index) {
+  const srcResolved = resolveEndpoint(config, entry.src);
+  const dstResolved = resolveEndpoint(config, entry.dst);
+  const services = resolveRuleServices(config, entry);
+  return {
+    index,
+    action: entry.action,
+    enabled: !entry.inactive,
+    srcintf: [],
+    dstintf: [],
+    srcResolved,
+    dstResolved,
+    services,
+    isAnyPort: services.some(c => !c.destPort),
+    isAnyDest: dstResolved.kind === 'any',
+  };
+}
+
+function buildRuleset(config, options) {
+  options = options || {};
+  const role = options.firewallRole || detectASARole(config);
   const rows = [];
 
   // Determine which ACLs are actually applied, and to which interface/direction
@@ -207,6 +264,18 @@ function buildRuleset(config) {
 
     const applications = aclApplication[aclName];
 
+    // Buyback matching is scoped to this ACL (its ACEs are evaluated in order,
+    // first-match, on a shared applied interface — so a deny ACE before a broad
+    // permit ACE within the same ACL carves ports/geo out of it). Build records
+    // over the ACL's scored ACEs and compute each permit ACE's buyback credit
+    // (direction-independent), keyed by the entry object.
+    const aceEntries = config.acls[aclName].filter(e => !e.remark);
+    const aclRecords = aceEntries.map((e, i) => asaBuybackRecord(config, e, i));
+    const creditByEntry = new Map();
+    aclRecords.forEach((rec, i) => {
+      if (rec.action === 'permit') creditByEntry.set(aceEntries[i], computeRuleBuyback(rec, aclRecords));
+    });
+
     // Per-ACL sequence number, restarting at 1 for each ACL, in original config order.
     // Inactive ACEs still consume a number (matching "show access-list" / ASDM), so the
     // numbering doesn't shift depending on whether inactive rules are currently shown.
@@ -220,9 +289,16 @@ function buildRuleset(config) {
 
       seq += 1;
       const ruleNumber = seq;
-      const scored = scoreEntry(config, entry);
+      const buyback = creditByEntry.get(entry);
+      // Direction (and therefore the score) can differ per application when the
+      // same ACL is bound to multiple interfaces, so score inside the loop.
       for (const app of applications) {
         const orderKey = interfaceOrderKey(config, app.interface);
+        const direction = asaDirection(config, app.interface, app.direction, role);
+        const scored = scoreEntry(config, entry, direction);
+        // Buyback credit is direction-independent; the in-context floor uses this
+        // application's own exposure/score.
+        if (buyback) Object.assign(scored, applyBuyback(scored, buyback));
         rows.push({
           id: ruleId++,
           type: 'rule',
@@ -350,3 +426,35 @@ function classifyLogging(entry) {
       : `Explicit log level ${setting.level} (${name}).`,
   };
 }
+
+// ============================================================
+// Vendor detection + registration
+// ============================================================
+// Confidence score that a given config blob is Cisco ASA. Markers are ASA-
+// exclusive grammar; the boot/asdm image lines are especially unambiguous.
+// ui.js compares this against every other registered vendor's detect() and
+// uses the highest scorer, so exact magnitude matters less than being clearly
+// above every non-ASA config's score (which should be ~0 for these markers).
+function detectASAConfig(text) {
+  let score = 0;
+  if (/^\s*access-list\s+\S+\s+(extended|remark)\s/m.test(text)) score += 3;
+  if (/^\s*access-group\s+\S+\s+(in|out)\s+interface\s/m.test(text)) score += 3;
+  if (/^\s*nameif\s+\S+/m.test(text)) score += 2;
+  if (/^\s*security-level\s+\d+/m.test(text)) score += 2;
+  if (/^\s*boot\s+system\s+disk\d+:/m.test(text)) score += 2; // ASA image boot line
+  if (/^\s*asdm\s+image\s+disk\d+:/m.test(text)) score += 2;   // ASDM GUI image line
+  if (/^\s*object\s+network\s+\S+/m.test(text)) score += 1;
+  // FortiOS/other block grammar should never appear in an ASA config; if it
+  // does, this isn't ASA.
+  if (/^\s*config\s+firewall\s+policy\b/m.test(text)) score = 0;
+  return score;
+}
+
+registerVendor({
+  id: 'asa',
+  label: 'Cisco ASA',
+  detect: detectASAConfig,
+  parse: parseASAConfig,
+  buildRuleset: buildRuleset,
+  detectRole: detectASARole,
+});

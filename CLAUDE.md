@@ -10,9 +10,19 @@ build dependencies beyond Node's standard library. `source/` holds the
 real source of truth; everything in `dist/` is generated — **never
 hand-edit `dist/`**, edit `source/` and run `node build.js`.
 
-Cisco ASA is the only vendor implemented today. This document exists
-mainly to make adding FortiOS (FortiGate) and PAN-OS (Palo Alto) support
-straightforward and consistent with the decisions already made for ASA.
+Cisco ASA and Fortinet FortiOS are implemented today; PAN-OS (Palo Alto)
+is the remaining planned vendor. This document exists mainly to make adding
+a vendor straightforward and consistent with the decisions already made.
+
+> **Active blueprint: see [`DESIGN.md`](DESIGN.md).** The next major
+> evolution — a firewall-role toggle, direction-aware exposure, a
+> compensating-control "buyback" credit, and a declarative policy-standards
+> layer with a risk-assessment/exception workflow — is specified there. It
+> **intentionally reverses** the "interface direction stays out of the risk
+> model" decision recorded below; `DESIGN.md` is authoritative where the two
+> disagree. The scoring+policy engine is also being built to be portable
+> into a separate firewall-rule-request tool, so keep it vendor-neutral and
+> DOM-free in `source/shared/`.
 
 ## Repo layout
 
@@ -29,6 +39,11 @@ source/
   shared/
     logging.js                # SYSLOG_LEVEL_NAMES — RFC 5424 severity names,
                                # universal across vendors
+    registry.js                # VENDOR_REGISTRY + registerVendor() +
+                                # detectVendor(). The vendor-neutral dispatch
+                                # layer: each vendor self-registers { id,
+                                # label, detect, parse, buildRuleset }; ui.js
+                                # calls detectVendor(text) to pick a parser.
     risk.js                    # vendor-neutral scoring: SERVICE_RISK_TABLE,
                                 # computeExposureScore(), combineRisk(),
                                 # riskBand(), classifyEndpointScope(),
@@ -45,46 +60,89 @@ source/
                                   # recursively, scoreEntry() (calls into
                                   # shared/risk.js for the actual math),
                                   # classifyLogging() (ASA's log/log
-                                  # disable/log <level> grammar), and
-                                  # buildRuleset() which assembles the
-                                  # final display rows (implicit-permit
-                                  # synthesis, default ordering, rule
-                                  # numbering)
-    fortios/                    # (not yet implemented)
+                                  # disable/log <level> grammar),
+                                  # buildRuleset() (implicit-permit synthesis,
+                                  # default ordering, rule numbering), and
+                                  # detectASAConfig() + registerVendor() at
+                                  # the bottom
+    fortios/
+      parser.js                 # parseFortiOSConfig(text) -> {interfaces,
+                                 # zones, addresses, addrgrps, services,
+                                 # serviceGroups, policies, staticRoutes} —
+                                 # walks FortiGate's config/edit/set/next/end
+                                 # block grammar
+      resolve.js                 # FortiOS-specific: resolves addresses/
+                                  # addrgrps/services, fortiScorePolicy(),
+                                  # fortiClassifyLogging() (logtraffic
+                                  # all/utm/disable), interface-trust from
+                                  # default-route egress + role,
+                                  # fortiBuildRuleset() (NO implicit-permit
+                                  # synthesis — FortiOS default-denies), and
+                                  # detectFortiOSConfig() + registerVendor()
     panos/                      # (not yet implemented)
   ui.js                        # all DOM code: file handling, table
                                 # rendering, sort/filter, expand/collapse,
-                                # CSV export. Vendor-neutral — consumes
-                                # buildRuleset()'s output as a black box
-                                # and never inspects vendor-specific fields
+                                # CSV export. Vendor-neutral — calls
+                                # detectVendor()/parse()/buildRuleset() and
+                                # consumes the row output as a black box,
+                                # never inspecting vendor-specific fields
                                 # directly except through the contract below
 dist/
   fwrra.html                  # combined build (all wired-in vendors)
   fwrra-asa.html              # per-vendor build
+  fwrra-fortios.html          # per-vendor build
 ```
 
-`build.js` loads scripts in this order for any given vendor build:
-`shared/logging.js`, `shared/risk.js`, then that vendor's `parser.js`,
-then that vendor's `resolve.js`, then `ui.js` last. There's no module
-system — everything hangs off the global scope inside the page — so load
-order is load-bearing. If a vendor's `resolve.js` needs something from
-`shared/`, it must already be defined by the time that vendor's files
-load, which the order above guarantees.
+`build.js` loads scripts in this order for any given build:
+`shared/logging.js`, `shared/registry.js`, `shared/risk.js`, then each
+vendor's engine, then `ui.js` last. There's no module system — the
+`shared/` files and `ui.js` hang off the global scope inside the page, so
+load order is load-bearing: anything a vendor or `ui.js` needs from
+`shared/` must already be defined by the time it runs, which the order
+above guarantees.
+
+**Vendor engines are the exception to "everything is global."** Each
+vendor's `parser.js` + `resolve.js` are concatenated and wrapped by
+`build.js` in a single per-vendor IIFE, so their top-level names
+(`parseXConfig`, `buildRuleset`, `scoreEntry`, `tokenize`, ...) stay
+**private to that vendor** and don't collide when multiple vendors are
+concatenated into the combined build. A vendor exposes itself to the rest
+of the page only by calling the global `registerVendor(...)` at the bottom
+of its `resolve.js`. This is why a new vendor can freely reuse names like
+`buildRuleset` internally — do NOT rename them to be vendor-unique, and do
+NOT rely on one vendor's internal helper being visible to another vendor
+or to `ui.js`; the only cross-boundary surface is the registered
+`{ detect, parse, buildRuleset }` and the shared globals.
 
 ## The vendor contract
 
-This is the part that matters most for adding FortiOS/PAN-OS. `ui.js`
-never parses vendor syntax and never branches on vendor identity — it
-only calls one entry point and renders whatever comes back:
+This is the part that matters most for adding a vendor (FortiOS is done;
+PAN-OS is the remaining one). `ui.js` never parses vendor syntax and never
+branches on vendor identity — it asks the registry which vendor a config
+belongs to, then calls that vendor's two entry points and renders whatever
+comes back:
 
 ```
-buildRuleset(config) -> Array<Row>
+detect(text)         -> number       // confidence; highest across vendors wins, 0 = not mine
+parse(text)          -> config       // vendor-internal parsed shape
+buildRuleset(config) -> Array<Row>   // the rows ui.js renders
 ```
 
-Every vendor's `resolve.js` must export a `buildRuleset()` (and whatever
-internal helpers it needs — `scoreEntry()`, `classifyLogging()`, etc. —
-these are implementation details `ui.js` doesn't call directly) that
-returns an array of row objects. Two `type`s exist:
+Each vendor's `resolve.js` ends by calling
+`registerVendor({ id, label, detect, parse, buildRuleset })`. `detect()`
+should score on grammar that is unambiguous for that vendor (ASA: `access-
+list ... extended`, `boot system disk*:`, `asdm image`; FortiOS:
+`#config-version=`, `config firewall policy`) and return 0 — or zero out —
+when a rival vendor's signature is present, so the combined build never
+mis-dispatches. `parse()` returns whatever internal shape that vendor's own
+`buildRuleset()` consumes, with one soft requirement: it should expose a
+top-level `interfaces` object (keyed by name) because `ui.js`'s file-info
+strip counts `Object.keys(config.interfaces).length`.
+
+`buildRuleset()` (plus whatever internal helpers it needs —
+`scoreEntry()`/`fortiScorePolicy()`, `classifyLogging()`, etc., which
+`ui.js` never calls directly) returns an array of row objects. Two `type`s
+exist:
 
 - `{ type: 'remark', aclName, text }` — a comment/label, not scored,
   rendered as an inline dim row.
@@ -150,19 +208,20 @@ with them unless a vendor's model genuinely doesn't fit:
   without being asked.
 - **Only enforced rules are scored.** For ASA, an ACL not bound via
   `access-group` has no effect on traffic and is excluded entirely (see
-  `appliedAcls` in `vendors/asa/resolve.js`). The equivalent concept for
-  FortiOS (policy must be in an active policy package / not disabled) and
-  PAN-OS (rule must not be disabled, and rulebase/vsys context matters)
-  should be enforced the same way — don't score rules that can't
-  currently fire.
+  `appliedAcls` in `vendors/asa/resolve.js`). FortiOS has no "unapplied"
+  concept — every policy is inherently bound to its srcintf/dstintf — so
+  its `resolve.js` scores every parsed policy (disabled ones are tagged,
+  not dropped; see next bullet). PAN-OS (rule must not be disabled, and
+  rulebase/vsys context matters) should follow the same spirit — don't
+  score rules that can't currently fire.
 - **Inactive/disabled rules are parsed and tagged, not deleted.** ASA's
-  `... inactive` keyword is tagged on the row (`row.inactive`) and hidden
-  by default via a UI toggle, not dropped from the ruleset. Rule
-  numbering **includes** inactive rules in the count, matching how the
-  vendor's own tooling numbers rules, so numbers don't shift when the
-  toggle is flipped. FortiOS (`set status disable`) and PAN-OS
-  (`disabled yes`) have their own equivalents and should follow the same
-  pattern.
+  `... inactive` keyword and FortiOS's `set status disable` both set
+  `row.inactive`, which the UI hides by default via a toggle rather than
+  dropping the row. Rule numbering **includes** inactive rules so numbers
+  don't shift when the toggle flips: ASA uses the ACE's per-ACL sequence,
+  FortiOS uses the FortiGate policy ID as `row.ruleNumber` (its canonical
+  reference) with evaluation-order position as the sort tiebreak. PAN-OS
+  (`disabled yes`) should follow the same tag-don't-drop pattern.
 - **Risk score = a "noisy-OR" combine of exposure and service:
   `combined = exposure + service − (exposure × service ⁄ 100)`, plus an
   additive "indiscriminate subnet" penalty for eligible services, capped
@@ -240,18 +299,31 @@ with them unless a vendor's model genuinely doesn't fit:
   the exact number matters less than which of these risk mechanisms it's
   meant to represent. Every vendor shares this table — don't fork it per
   vendor. If the user asks to add/adjust ports, edit this table directly.
-- **Implicit permit-any/any synthesis** is currently ASA-specific logic
+- **Implicit permit-any/any synthesis** is ASA-specific logic
   (in `vendors/asa/resolve.js`) modeling the ASA's real default behavior:
   for every interface pair where the source's security level is strictly
   higher than the destination's, if the source has no inbound ACL
   applied, a flagged score-100 "implicit" rule is synthesized. FortiOS
-  and PAN-OS both default-deny inter-zone traffic without an explicit
-  policy (unlike ASA's default-permit-higher-to-lower), so this specific
-  synthesis logic should generally **not** be ported as-is to those
-  vendors — but the general idea (flag default behavior that isn't an
-  explicit, visible rule) may still apply if either vendor has its own
-  default-allow edge cases worth surfacing. Confirm with the user before
-  assuming FortiOS/PAN-OS need an equivalent.
+  default-denies inter-zone traffic without an explicit policy, so — as
+  this doc predicted — its `resolve.js` does **not** synthesize anything;
+  it only scores explicit policies. PAN-OS also default-denies, so the
+  same holds there. Confirm with the user before assuming a vendor needs
+  an equivalent.
+- **FortiOS interface trust (default ordering only).** FortiGate has no
+  native numeric security-level like ASA's 0–100. `fortiInterfaceTrust()`
+  derives an ordinal from routing and role, in priority order: the
+  interface that egresses a **default route** (a `router static` entry
+  with no `set dst`, i.e. dst 0.0.0.0/0 — the gateway may be dynamic/DHCP
+  with no IP, so the `device` is the signal) is the internet edge and
+  scores 0 (least trusted); otherwise `set role` maps wan→0, dmz→50,
+  lan→100; an untagged interface defaults to 60 (internal-ish, below
+  explicit lan); a zone inherits the minimum trust of its members. This
+  feeds `row.defaultOrder.level` only — it is a UI-sort convenience and
+  deliberately kept out of the risk model (exposure is address-based, not
+  interface-based), same as ASA's security-level. The default-route signal
+  was a specific user governance decision; don't replace it with role-only
+  detection without checking in, since real configs frequently leave
+  `set role` unset on internal interfaces.
 - **Default sort order**: most-trusted zone/interface first, ties broken
   by interface/zone name ascending, then by each rule's position within
   its own rule list. Driven by `row.defaultOrder` (vendor-supplied) and
