@@ -277,10 +277,13 @@ additive step against the now-stable contract.
   4. Policy-standard engine: declarative ruleset + defaults, verdict
      computation, exception data model, audit-gap + hardening surfaces in
      `ui.js`.
-- **Phase 2 — PAN-OS.** New `vendors/panos/` parser (set format) + resolve
-  supplying the same zone-trust/direction/service-identity contract, plus the
-  App-ID→port map. No `shared/` changes expected — Phase 2 validates the
-  abstraction (rule of three).
+- **Phase 2 — PAN-OS. [DONE]** `vendors/panos/` parser (set format, one
+  attribute per line) + resolve supplying the same zone-trust/direction/
+  service-identity contract, with a `PANOS_APPID_PORTS` map so
+  `application-default` rules score on their App-ID's real ports (e.g.
+  `application ms-rdp` → tcp/3389, correctly triggering the remote-access-
+  inbound standard). Landed with **zero `shared/` changes** — the rule-of-three
+  validated the abstraction.
 
 **Economy captured by designing for three now:** the contract additions
 (zone-trust, direction, normalized service identity) are specified with PAN-OS's

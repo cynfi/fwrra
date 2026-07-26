@@ -10,9 +10,9 @@ build dependencies beyond Node's standard library. `source/` holds the
 real source of truth; everything in `dist/` is generated — **never
 hand-edit `dist/`**, edit `source/` and run `node build.js`.
 
-Cisco ASA and Fortinet FortiOS are implemented today; PAN-OS (Palo Alto)
-is the remaining planned vendor. This document exists mainly to make adding
-a vendor straightforward and consistent with the decisions already made.
+Cisco ASA, Fortinet FortiOS, and Palo Alto PAN-OS are all implemented
+today. This document exists mainly to make adding a vendor straightforward
+and consistent with the decisions already made.
 
 > **Active blueprint: see [`DESIGN.md`](DESIGN.md).** The next major
 > evolution — a firewall-role toggle, direction-aware exposure, a
@@ -87,7 +87,18 @@ source/
                                   # fortiBuildRuleset() (NO implicit-permit
                                   # synthesis — FortiOS default-denies), and
                                   # detectFortiOSConfig() + registerVendor()
-    panos/                      # (not yet implemented)
+    panos/
+      parser.js                 # parsePanOSConfig(text) -> {interfaces, zones,
+                                 # addresses, addressGroups, services,
+                                 # serviceGroups, rules, routes} — Palo Alto
+                                 # "set" format (one attribute per line)
+      resolve.js                 # PAN-OS-specific: PANOS_APPID_PORTS map (so
+                                  # application-default rules score on their
+                                  # App-ID's real ports), zone trust from
+                                  # default-route egress + zone-name, default-
+                                  # deny (no synthesis), panClassifyLogging
+                                  # (log-end/log-start), panBuildRuleset, and
+                                  # detectPanOSConfig() + registerVendor()
   ui.js                        # all DOM code: file handling, table
                                 # rendering, sort/filter, expand/collapse,
                                 # CSV export. Vendor-neutral — calls
@@ -99,6 +110,7 @@ dist/
   fwrra.html                  # combined build (all wired-in vendors)
   fwrra-asa.html              # per-vendor build
   fwrra-fortios.html          # per-vendor build
+  fwrra-panos.html            # per-vendor build
 ```
 
 `build.js` loads scripts in this order for any given build:

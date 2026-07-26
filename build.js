@@ -35,7 +35,7 @@ const OUT_DIR = path.join(__dirname, 'dist');
 
 // Vendors wired into the build. Each needs source/vendors/<name>/parser.js
 // and source/vendors/<name>/resolve.js.
-const VENDORS = ['asa', 'fortios'];
+const VENDORS = ['asa', 'fortios', 'panos'];
 
 function read(...parts) {
   return fs.readFileSync(path.join(SRC, ...parts), 'utf8');

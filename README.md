@@ -5,11 +5,11 @@ scores every enforced rule for exposure risk — the kind of triage view
 vendor management consoles don't give you in one place. It runs entirely
 client-side: nothing you load is uploaded anywhere.
 
-**Current vendor support: Cisco ASA and Fortinet FortiGate (FortiOS).**
-Palo Alto (PAN-OS) support is planned — see
+**Current vendor support: Cisco ASA, Fortinet FortiGate (FortiOS), and
+Palo Alto (PAN-OS).** Drop a config from any supported vendor onto the
+combined build and it auto-detects which parser to use — see
 [Multi-vendor architecture](#multi-vendor-architecture) below for how the
-codebase is laid out to support that. Drop a config from either supported
-vendor onto the combined build and it auto-detects which parser to use.
+codebase is laid out.
 
 ## What it does
 
@@ -136,7 +136,7 @@ source/
   vendors/
     asa/            # Cisco ASA: parser.js + resolve.js
     fortios/        # Fortinet FortiGate: parser.js + resolve.js
-    panos/          # (planned) Palo Alto
+    panos/          # Palo Alto PAN-OS: parser.js + resolve.js
   ui.js             # vendor-neutral presentation layer
   template.html     # page shell, styles, DOM structure
 ```
