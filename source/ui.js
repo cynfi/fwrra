@@ -256,15 +256,14 @@
     return true;
   }
 
-  // Default order: most-secure interface first (desc security level), tie-broken by
-  // interface name (asc), then by each rule's position within its ACL (asc).
-  // This yields "inside -> outside" style blocks first, "outside -> inside" last,
-  // matching how the ASA itself evaluates and how engineers reason about the ruleset.
+  // Default order: rulebase order — rules exactly as they appear in the
+  // configuration. `row.id` is assigned in parse/build order (per policy for
+  // FortiOS/PAN-OS; per ACL then ACE for ASA, with any synthesized implicit
+  // rules last), so it is the config's own ordering. This is what firewall
+  // engineers reason about (first-match evaluation order), and it does not
+  // regroup by interface/zone the way an earlier ASA-specific default did.
   function compareDefaultOrder(a, b) {
-    const ao = a.defaultOrder, bo = b.defaultOrder;
-    if (ao.level !== bo.level) return bo.level - ao.level; // higher security level first
-    if (ao.ifName !== bo.ifName) return ao.ifName.localeCompare(bo.ifName); // lowest-named interface first on ties
-    return ao.ruleNumber - bo.ruleNumber; // original ACL order
+    return a.id - b.id;
   }
 
   function sortRows(rows) {
@@ -313,9 +312,9 @@
 
     const inactiveCount = ROWS.filter(r => r.type === 'rule' && r.inactive).length;
     const inactiveNote = inactiveCount
-      ? (showInactive ? ` ${inactiveCount} inactive ACE${inactiveCount === 1 ? '' : 's'} shown dimmed.` : ` ${inactiveCount} inactive ACE${inactiveCount === 1 ? '' : 's'} hidden \u2014 toggle "Show inactive" to view.`)
+      ? (showInactive ? ` ${inactiveCount} inactive rule${inactiveCount === 1 ? '' : 's'} shown dimmed.` : ` ${inactiveCount} inactive rule${inactiveCount === 1 ? '' : 's'} hidden \u2014 toggle "Show inactive" to view.`)
       : '';
-    footerNote.textContent = `Showing ${sorted.length} of ${ROWS.filter(r => r.type === 'rule').length} rules.${inactiveNote} Rule # reflects position within its ACL in original config order (including inactive ACEs, matching 'show access-list'). Risk scoring is heuristic \u2014 use as a triage aid, not a compliance verdict.`;
+    footerNote.textContent = `Showing ${sorted.length} of ${ROWS.filter(r => r.type === 'rule').length} rules.${inactiveNote} Rules are listed in rulebase order \u2014 as they appear in the configuration \u2014 including inactive rules, which keep their position. Risk scoring is heuristic \u2014 use as a triage aid, not a compliance verdict.`;
   }
 
   function buildRuleRow(row) {

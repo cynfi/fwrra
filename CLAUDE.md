@@ -338,17 +338,26 @@ with them unless a vendor's model genuinely doesn't fit:
   scores 0 (least trusted); otherwise `set role` maps wan→0, dmz→50,
   lan→100; an untagged interface defaults to 60 (internal-ish, below
   explicit lan); a zone inherits the minimum trust of its members. This
-  feeds `row.defaultOrder.level` only — it is a UI-sort convenience and
-  deliberately kept out of the risk model (exposure is address-based, not
-  interface-based), same as ASA's security-level. The default-route signal
-  was a specific user governance decision; don't replace it with role-only
-  detection without checking in, since real configs frequently leave
-  `set role` unset on internal interfaces.
-- **Default sort order**: most-trusted zone/interface first, ties broken
-  by interface/zone name ascending, then by each rule's position within
-  its own rule list. Driven by `row.defaultOrder` (vendor-supplied) and
-  compared in `ui.js`'s `compareDefaultOrder()`. This is a UI
-  convenience, not part of the risk model.
+  feeds `row.defaultOrder.level` only — it is deliberately kept out of the
+  risk model (exposure is address-based, not interface-based), same as
+  ASA's security-level. The default-route signal was a specific user
+  governance decision; don't replace it with role-only detection without
+  checking in, since real configs frequently leave `set role` unset on
+  internal interfaces. (Note: `defaultOrder.level`/`ifName` no longer drive
+  the default *sort* — see next bullet — but the trust ordinal is still
+  computed and may be surfaced as a sortable column later.)
+- **Default sort order = rulebase order.** Rules are listed exactly as they
+  appear in the configuration (first-match evaluation order), via
+  `compareDefaultOrder()` sorting on `row.id` (assigned in parse/build
+  order). This **reverses** an earlier ASA-specific default that regrouped
+  rules most-trusted-interface-first; a user governance decision — a
+  firewall's rulebase order is what engineers reason about, and regrouping
+  by interface hid where a rule actually sits relative to the denies above
+  it (which matters for the buyback's "blocked first" logic). Inactive
+  rules keep their position; ASA's synthesized implicit rules sort last
+  (they aren't in the config). This is a UI convenience, not part of the
+  risk model. Don't reintroduce interface-grouped default sort without
+  checking in.
 - **Logging classification**: no logging configured, or logging
   explicitly disabled, is flagged; `deny`/block rules without logging are
   flagged at higher severity than `permit`/allow rules without logging,

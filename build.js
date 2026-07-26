@@ -70,11 +70,22 @@ function vendorEngine(vendorName) {
   return `// ---- vendor engine: ${vendorName} ----\n;(function () {\n${body}\n})();`;
 }
 
+// Short, human-facing vendor names used in the per-vendor page title / dropzone.
+const VENDOR_TITLES = { asa: 'Cisco ASA', fortios: 'FortiOS', panos: 'PAN-OS' };
+
 function buildOne(template, vendorNames, outFile) {
   const engine = [sharedModules(), ...vendorNames.map(vendorEngine)].join('\n');
   const ui = read('ui.js');
 
   let html = template;
+
+  // Per-vendor builds get a "(Cisco ASA)" / "(FortiOS)" / "(PAN-OS)" suffix and a
+  // vendor-specific dropzone label; the combined build stays vendor-neutral and
+  // auto-detects (the file-info strip shows the detected vendor).
+  const single = vendorNames.length === 1 ? vendorNames[0] : null;
+  const vendorSuffix = single ? ` (${VENDOR_TITLES[single] || single})` : '';
+  const dropName = single ? (VENDOR_TITLES[single] || single) : 'firewall';
+  html = html.split('{{VENDOR_SUFFIX}}').join(vendorSuffix).split('{{DROP_NAME}}').join(dropName);
   if (!html.includes('<script id="engine-scripts"></script>')) {
     throw new Error('template.html is missing the empty <script id="engine-scripts"></script> placeholder');
   }

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ASA Rule Risk Analyzer</title>
+<title>Firewall Rule Risk Analyzer</title>
 <style>
   @font-face { font-family: 'sys-mono'; src: local('JetBrains Mono'), local('SF Mono'), local('Consolas'); }
   :root {
@@ -273,8 +273,8 @@
 <div class="app">
   <div class="header">
     <div>
-      <h1><span class="dot"></span>ASA Rule Risk Analyzer</h1>
-      <div class="sub">access-list exposure scoring &middot; runs entirely in your browser, nothing uploaded</div>
+      <h1><span class="dot"></span>Firewall Rule Risk Analyzer</h1>
+      <div class="sub">rule exposure &amp; policy scoring &middot; runs entirely in your browser, nothing uploaded</div>
     </div>
     <div class="header-actions" id="headerActions" style="display:none;">
       <button id="loadNewBtn">Load different config</button>
@@ -285,11 +285,11 @@
   <div id="dropZoneContainer">
     <div class="dropzone" id="dropzone" tabindex="0">
       <div class="icon">&#9635;</div>
-      <h2>Drop an ASA config file, or click to browse</h2>
-      <p>Parses objects, object-groups, access-lists, and interface bindings &mdash; entirely client-side</p>
+      <h2>Drop a firewall config file, or click to browse</h2>
+      <p>Parses addresses, services, rules, and zone/interface bindings &mdash; entirely client-side</p>
       <button class="primary" id="browseBtn">Choose file</button>
       <input type="file" id="fileInput" accept=".txt,.cfg,.conf,.config">
-      <div class="hint">expects a running-config or show run output from an ASA / ASAv</div>
+      <div class="hint">expects a full firewall configuration export</div>
     </div>
   </div>
 
@@ -344,7 +344,7 @@
         <span>Show inactive</span>
       </label>
       <input type="text" id="searchBox" placeholder="filter by address, object name, port...">
-      <button id="resetOrderBtn" style="display:none;" title="Return to inside\u2192outside, then outside\u2192inside, in original ACL order">\u21BA Reset to default order</button>
+      <button id="resetOrderBtn" style="display:none;" title="Return to rulebase order (rules as they appear in the configuration)">\u21BA Reset to rulebase order</button>
       <div class="spacer"></div>
       <div class="legend">
         <div class="item"><span class="sw" style="background:var(--c-critical)"></span>critical</div>
@@ -3340,15 +3340,14 @@ registerVendor({
     return true;
   }
 
-  // Default order: most-secure interface first (desc security level), tie-broken by
-  // interface name (asc), then by each rule's position within its ACL (asc).
-  // This yields "inside -> outside" style blocks first, "outside -> inside" last,
-  // matching how the ASA itself evaluates and how engineers reason about the ruleset.
+  // Default order: rulebase order — rules exactly as they appear in the
+  // configuration. `row.id` is assigned in parse/build order (per policy for
+  // FortiOS/PAN-OS; per ACL then ACE for ASA, with any synthesized implicit
+  // rules last), so it is the config's own ordering. This is what firewall
+  // engineers reason about (first-match evaluation order), and it does not
+  // regroup by interface/zone the way an earlier ASA-specific default did.
   function compareDefaultOrder(a, b) {
-    const ao = a.defaultOrder, bo = b.defaultOrder;
-    if (ao.level !== bo.level) return bo.level - ao.level; // higher security level first
-    if (ao.ifName !== bo.ifName) return ao.ifName.localeCompare(bo.ifName); // lowest-named interface first on ties
-    return ao.ruleNumber - bo.ruleNumber; // original ACL order
+    return a.id - b.id;
   }
 
   function sortRows(rows) {
@@ -3397,9 +3396,9 @@ registerVendor({
 
     const inactiveCount = ROWS.filter(r => r.type === 'rule' && r.inactive).length;
     const inactiveNote = inactiveCount
-      ? (showInactive ? ` ${inactiveCount} inactive ACE${inactiveCount === 1 ? '' : 's'} shown dimmed.` : ` ${inactiveCount} inactive ACE${inactiveCount === 1 ? '' : 's'} hidden \u2014 toggle "Show inactive" to view.`)
+      ? (showInactive ? ` ${inactiveCount} inactive rule${inactiveCount === 1 ? '' : 's'} shown dimmed.` : ` ${inactiveCount} inactive rule${inactiveCount === 1 ? '' : 's'} hidden \u2014 toggle "Show inactive" to view.`)
       : '';
-    footerNote.textContent = `Showing ${sorted.length} of ${ROWS.filter(r => r.type === 'rule').length} rules.${inactiveNote} Rule # reflects position within its ACL in original config order (including inactive ACEs, matching 'show access-list'). Risk scoring is heuristic \u2014 use as a triage aid, not a compliance verdict.`;
+    footerNote.textContent = `Showing ${sorted.length} of ${ROWS.filter(r => r.type === 'rule').length} rules.${inactiveNote} Rules are listed in rulebase order \u2014 as they appear in the configuration \u2014 including inactive rules, which keep their position. Risk scoring is heuristic \u2014 use as a triage aid, not a compliance verdict.`;
   }
 
   function buildRuleRow(row) {
