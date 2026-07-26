@@ -12,7 +12,10 @@ hand-edit `dist/`**, edit `source/` and run `node build.js`.
 
 Cisco ASA, Fortinet FortiOS, and Palo Alto PAN-OS are all implemented
 today. This document exists mainly to make adding a vendor straightforward
-and consistent with the decisions already made.
+and consistent with the decisions already made. (Cisco Firepower / FTD is a
+**distinct planned vendor**, not an ASA variant — its FMC-managed Access
+Control Policy is zone/app-based, closer to PAN-OS; see `DESIGN.md` §10.
+Don't extend the ASA parser for it.)
 
 > **Active blueprint: see [`DESIGN.md`](DESIGN.md).** The next major
 > evolution — a firewall-role toggle, direction-aware exposure, a

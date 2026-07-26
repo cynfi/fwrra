@@ -234,14 +234,15 @@ resolved endpoints/services (existing contract), plus **zone-trust class** and
 **direction** per rule. The novelty (direction exposure, buyback, matching,
 policy verdict, exceptions) is built once in `shared/`.
 
-| Concept | Cisco ASA | Fortinet FortiOS | Palo Alto PAN-OS |
-|---|---|---|---|
-| Trust source | native security-level (0–100) | default-route egress + `set role` | zone (untrust/trust/dmz) + default-route egress |
-| Default behavior | permit high→low (implicit rules synthesized) | default-deny (no synthesis) | default-deny interzone / allow intrazone (no synthesis) |
-| Rule identity | ACL name + ACE seq | policy ID | rule name |
-| Disabled marker | `inactive` | `set status disable` | `disabled yes` |
-| Service identity | protocol/port | protocol/port | **App-ID and/or service** — App-ID mapped to port(s) |
-| Config format | line grammar | config/edit/set/next/end | **"set" format first**; XML export later |
+| Concept | Cisco ASA | Fortinet FortiOS | Palo Alto PAN-OS | Cisco Firepower (FTD/FMC) — planned |
+|---|---|---|---|---|
+| Trust source | native security-level (0–100) | default-route egress + `set role` | zone (untrust/trust/dmz) + default-route egress | security zones + default-route egress (like PAN-OS) |
+| Default behavior | permit high→low (implicit rules synthesized) | default-deny (no synthesis) | default-deny interzone / allow intrazone (no synthesis) | ordered ACP + explicit **Default Action** (Block/Allow) at the end; no synthesis |
+| Rule identity | ACL name + ACE seq | policy ID | rule name | ACP rule name + position |
+| Disabled marker | `inactive` | `set status disable` | `disabled yes` | rule `Enabled: false` |
+| Service identity | protocol/port | protocol/port | **App-ID and/or service** — App-ID mapped to port(s) | port objects **and/or** application conditions — apps mapped to port(s), like PAN-OS |
+| Config format | line grammar | config/edit/set/next/end | **"set" format first**; XML export later | **`show access-control-config` text** first; FMC REST JSON later |
+| Actions | permit / deny | accept / deny | allow / deny | **Allow / Trust / Monitor / Block / Block-with-reset / Interactive-Block** (see §10) |
 
 **PAN-OS notes for whoever implements it:**
 - Shares FortiOS's **default-route → internet-edge** detection and
@@ -285,6 +286,14 @@ additive step against the now-stable contract.
   inbound standard). Landed with **zero `shared/` changes** — the rule-of-three
   validated the abstraction.
 
+- **Phase 3 — Cisco Firepower (FTD/FMC). [PLANNED — blocked on a sample]** New
+  `vendors/firepower/` parser + resolve for the Access Control Policy (see §10).
+  Expected to reuse the shared engine like PAN-OS did (zone-trust, direction,
+  buyback, policy verdict); the new work is the ACP text parser and the
+  action-verb mapping. **Not startable without a real `show access-control-config`
+  (or FMC JSON) sample** — the exact text layout varies by version and must be
+  built against a real artifact, exactly as ASA/FortiOS were.
+
 **Economy captured by designing for three now:** the contract additions
 (zone-trust, direction, normalized service identity) are specified with PAN-OS's
 zone model and App-ID constraint already in view, so Phase 2 needs no core
@@ -302,3 +311,56 @@ it's stable.
 - The **policy standard defaults** (§5) — shipped defaults are a starting point;
   the standard is user-editable.
 - The **App-ID → port map** (§7) — common mappings shipped; extendable.
+
+---
+
+## 10. Cisco Firepower (FTD/FMC) — planned vendor
+
+**Firepower is NOT an ASA variant.** FTD runs an ASA-like data plane (LINA) for
+interfaces / NAT / routing, but its rules live in an FMC-managed, ordered
+**Access Control Policy (ACP)** — zone-based and application-aware, far closer to
+PAN-OS/FortiOS than to ASA's `access-list` grammar. Do **not** try to extend the
+ASA parser for it; it is its own `vendors/firepower/` vendor.
+
+### Config artifact (in priority order)
+
+- **`show access-control-config`** (FTD CLI) — a text dump of the *deployed* ACP,
+  one block per rule (`Action:`, `Source Zones:`, `Destination Zones:`, `Source
+  Networks:`, `Destination Networks:`, `Destination Ports:`, `Applications:`,
+  `Logging Configuration:`, …). **This is the first parse target** — it is a file
+  a user can hand the tool, analogous to a FortiOS/PAN-OS export.
+- **FMC REST API** (policy as JSON) — cleanest structurally, but an API pull, not
+  a dropped file; a later option.
+- **Do NOT parse FTD `show running-config`** for rules — that is the LINA config
+  (interfaces/NAT/routing, ASA-ish syntax) and does **not** contain the real ACP.
+  It could still be a secondary source for zone↔interface and default-route
+  detection if provided alongside.
+
+### Action-verb mapping (the real new work)
+
+Firepower has more than allow/deny, and two verbs need care:
+
+| ACP action | Maps to | Note |
+|---|---|---|
+| **Allow** | `permit` | normal inspected allow |
+| **Trust** | `permit` | allowed **without** Snort inspection — arguably *higher* risk than Allow (bypasses IPS/file policy); flag it (e.g. a small service-risk bump or a policy-standard entry "Trust to/from untrusted"). |
+| **Block**, **Block with reset** | `deny` | drop |
+| **Interactive Block** (± reset) | `deny` | user can click through, but model as deny for scoring |
+| **Monitor** | *neither* | a Monitor rule only **logs** and does not terminate the match — evaluation continues to later rules. It must **not** be scored as a permit or a deny, and it must **not** earn buyback credit or a policy verdict. Surface it as an informational row. This is the one genuinely new control-flow concept vs the other vendors. |
+
+### What reuses vs what's new
+
+- **Reuses** (no `shared/` changes expected): zone-trust (security zones +
+  default-route egress, like PAN-OS), direction, exposure, buyback, policy
+  verdict, exceptions. Applications map to `{protocol, port}` via the same
+  approach as `PANOS_APPID_PORTS`.
+- **New**: the ACP text parser; the action-verb mapping above (esp. Trust risk
+  and Monitor's pass-through semantics); optionally the **Prefilter policy**
+  (fastpath / block / analyze rules evaluated *before* the ACP) — treat as a
+  later enhancement, note it but don't block v1 on it.
+
+### Blocked on
+
+A real `show access-control-config` (or FMC JSON) sample. Build and validate
+against the actual artifact, exactly as ASA/FortiOS/PAN-OS were — the text layout
+varies by FTD/FMC version, so guessing the format would be fragile.
