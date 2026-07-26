@@ -45,12 +45,20 @@ source/
                                 # label, detect, parse, buildRuleset }; ui.js
                                 # calls detectVendor(text) to pick a parser.
     risk.js                    # vendor-neutral scoring: SERVICE_RISK_TABLE,
-                                # computeExposureScore(), combineRisk(),
-                                # riskBand(), classifyEndpointScope(),
-                                # maskToPrefixLen(). Pure functions operating
-                                # on a normalized {kind, prefixLen} scope
-                                # shape and (protocol, port) pairs — nothing
-                                # here knows any vendor's config grammar.
+                                # computeExposureScore() (direction-aware),
+                                # combineRisk(), riskBand(),
+                                # classifyEndpointScope(), trustClassFromLevel(),
+                                # ruleDirection(), the buyback engine
+                                # (BUYBACK_CREDIT, computeRuleBuyback,
+                                # applyBuyback). Pure functions on a normalized
+                                # {kind, prefixLen, breadth} scope shape and
+                                # (protocol, port) pairs — no vendor grammar.
+    policy.js                  # vendor-neutral policy-standards layer:
+                                # DEFAULT_POLICY_STANDARD (declarative deny-by-
+                                # default patterns) + evaluatePolicy() ->
+                                # compliant/against-policy verdict. Uses
+                                # buybackKeyForCombo() from risk.js, so loads
+                                # after it. See DESIGN.md §5-6.
   vendors/
     asa/
       parser.js                 # parseASAConfig(text) -> {objects, groups,
@@ -94,8 +102,8 @@ dist/
 ```
 
 `build.js` loads scripts in this order for any given build:
-`shared/logging.js`, `shared/registry.js`, `shared/risk.js`, then each
-vendor's engine, then `ui.js` last. There's no module system — the
+`shared/logging.js`, `shared/registry.js`, `shared/risk.js`,
+`shared/policy.js`, then each vendor's engine, then `ui.js` last. There's no module system — the
 `shared/` files and `ui.js` hang off the global scope inside the page, so
 load order is load-bearing: anything a vendor or `ui.js` needs from
 `shared/` must already be defined by the time it runs, which the order

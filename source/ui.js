@@ -24,6 +24,7 @@
   const filterLogging = document.getElementById('filterLogging');
   const showInactiveToggle = document.getElementById('showInactiveToggle');
   const roleSelect = document.getElementById('roleSelect');
+  const filterPolicy = document.getElementById('filterPolicy');
   const searchBox = document.getElementById('searchBox');
   const footerNote = document.getElementById('footerNote');
   const fileInfoName = document.getElementById('fileInfoName');
@@ -114,10 +115,15 @@
     const bands = { Critical: 0, High: 0, Medium: 0, Low: 0, None: 0 };
     let implicitCount = 0;
     let unloggedCount = 0;
+    let againstOpen = 0;
+    let exceptions = 0;
     for (const r of ruleRows) {
       bands[r.scored.band.label] = (bands[r.scored.band.label] || 0) + 1;
       if (r.implicit) implicitCount++;
       if (r.scored.logging.flagged) unloggedCount++;
+      const ev = effectiveVerdict(r);
+      if (ev.state === 'open') againstOpen++;
+      else if (ev.state === 'exception') exceptions++;
     }
     summaryEl.innerHTML = `
       <div class="cell"><div class="n">${ruleRows.length}</div><div class="l">Total rules</div></div>
@@ -125,6 +131,8 @@
       <div class="cell high"><div class="n">${bands.High}</div><div class="l">High</div></div>
       <div class="cell med"><div class="n">${bands.Medium}</div><div class="l">Medium</div></div>
       <div class="cell low"><div class="n">${bands.Low}</div><div class="l">Low</div></div>
+      <div class="cell"><div class="n" style="color:${againstOpen ? 'var(--c-critical)' : 'var(--text-bright)'}">${againstOpen}</div><div class="l">Against policy</div></div>
+      <div class="cell"><div class="n" style="color:${exceptions ? 'var(--c-high)' : 'var(--text-bright)'}">${exceptions}</div><div class="l">Exceptions</div></div>
       <div class="cell"><div class="n" style="color:${implicitCount ? 'var(--c-critical)' : 'var(--text-bright)'}">${implicitCount}</div><div class="l">Implicit permits</div></div>
       <div class="cell"><div class="n" style="color:${unloggedCount ? 'var(--c-medium)' : 'var(--text-bright)'}">${unloggedCount}</div><div class="l">No logging</div></div>
     `;
@@ -168,6 +176,7 @@
   filterAction.addEventListener('change', renderTable);
   filterImplicit.addEventListener('change', renderTable);
   filterLogging.addEventListener('change', renderTable);
+  if (filterPolicy) filterPolicy.addEventListener('change', renderTable);
   if (roleSelect) {
     // Changing the firewall role re-scores every rule (direction-aware
     // exposure), so rebuild the ruleset from the already-parsed config and
@@ -229,6 +238,12 @@
     if (filterImplicit.value === 'explicit' && row.implicit) return false;
     if (filterLogging.value === 'unlogged' && !s.logging.flagged) return false;
     if (filterLogging.value === 'logged' && s.logging.flagged) return false;
+    if (filterPolicy && filterPolicy.value !== 'all') {
+      const state = effectiveVerdict(row).state;
+      if (filterPolicy.value === 'against' && state !== 'open') return false;
+      if (filterPolicy.value === 'exception' && state !== 'exception') return false;
+      if (filterPolicy.value === 'compliant' && state !== 'compliant') return false;
+    }
     const q = searchBox.value.trim().toLowerCase();
     if (q) {
       const haystack = [
@@ -321,7 +336,7 @@
         </div>
         <div class="risk-band-pill" style="background:${band.color}22; color:${band.color}; border:1px solid ${band.color}55;">${band.label}</div>
       </td>
-      <td><span class="${s.action === 'permit' ? 'action-permit' : 'action-deny'}">${s.action}</span>${row.inactive ? '<span class="inactive-tag">INACTIVE</span>' : ''}</td>
+      <td><span class="${s.action === 'permit' ? 'action-permit' : 'action-deny'}">${s.action}</span>${row.inactive ? '<span class="inactive-tag">INACTIVE</span>' : ''}${policyPill(row)}</td>
       <td class="mono">${(s.services[0] && s.services[0].protocol ? s.services[0].protocol : 'ip').toUpperCase()}</td>
       <td class="mono">${escapeHtml(endpointText(s.srcResolved))}</td>
       <td class="mono">${escapeHtml(endpointText(s.dstResolved))}</td>
@@ -342,6 +357,94 @@
     if (EXPANDED.has(id)) EXPANDED.delete(id);
     else EXPANDED.add(id);
     renderTable();
+  }
+
+  // ---- policy verdict + exceptions (localStorage-backed, tri-state) ----
+  // An `against-policy` finding is not a hard block: it can carry a documented,
+  // time-bound exception (risk acceptance). Exceptions are stored locally,
+  // keyed by a stable rule identity, and expire.
+  const EXC_STORE_KEY = 'fwrra-policy-exceptions';
+  function loadExceptions() {
+    try { return JSON.parse(localStorage.getItem(EXC_STORE_KEY) || '{}'); } catch (e) { return {}; }
+  }
+  function saveExceptions(o) {
+    try { localStorage.setItem(EXC_STORE_KEY, JSON.stringify(o)); } catch (e) { /* storage disabled */ }
+  }
+  function ruleKey(row) {
+    const s = row.scored;
+    const svc = (s.services || []).map(c => `${c.protocol}/${c.destPort || 'any'}`).join(',');
+    return [CURRENT_VENDOR ? CURRENT_VENDOR.id : '', row.aclName || '', row.ruleNumber || '', s.direction || '', svc].join('|');
+  }
+  function getException(row) {
+    const exc = loadExceptions()[ruleKey(row)];
+    if (!exc) return null;
+    const expired = exc.expiry && Date.parse(exc.expiry) < Date.now();
+    return Object.assign({}, exc, { expired });
+  }
+  // Effective verdict state: 'compliant' | 'open' | 'exception'
+  function effectiveVerdict(row) {
+    const v = row.scored.policyVerdict;
+    if (!v || v.verdict !== 'against-policy') return { state: 'compliant', matches: v ? v.matches : [] };
+    const exc = getException(row);
+    if (exc && !exc.expired) return { state: 'exception', matches: v.matches, exc };
+    return { state: 'open', matches: v.matches, exc: exc || null, wasExpired: !!(exc && exc.expired) };
+  }
+  function recordException(row) {
+    const justification = prompt('Exception — business justification for this against-policy rule:');
+    if (!justification) return;
+    const owner = prompt('Risk acceptor / owner (who signs off):') || '';
+    const daysStr = prompt('Expires in how many days?', '90');
+    const days = parseInt(daysStr, 10);
+    const expiry = (!isNaN(days) && days > 0) ? new Date(Date.now() + days * 86400000).toISOString().slice(0, 10) : '';
+    const store = loadExceptions();
+    store[ruleKey(row)] = { justification, owner, created: new Date().toISOString().slice(0, 10), expiry };
+    saveExceptions(store);
+    renderSummary();
+    renderTable();
+  }
+  function clearException(row) {
+    const store = loadExceptions();
+    delete store[ruleKey(row)];
+    saveExceptions(store);
+    renderSummary();
+    renderTable();
+  }
+  function policyPill(row) {
+    const ev = effectiveVerdict(row);
+    if (ev.state === 'compliant') return '';
+    if (ev.state === 'exception') {
+      return `<span class="policy-pill policy-exc" title="Against policy, with an accepted exception${ev.exc && ev.exc.expiry ? ' (expires ' + escapeHtml(ev.exc.expiry) + ')' : ''}.">EXCEPTION</span>`;
+    }
+    const ids = ev.matches.map(m => m.id).join(', ');
+    return `<span class="policy-pill policy-open" title="Against policy: ${escapeHtml(ids)}${ev.wasExpired ? ' (exception expired)' : ''}.">⚠ POLICY</span>`;
+  }
+
+  function renderPolicySection(row) {
+    const v = row.scored.policyVerdict;
+    if (!v) return '';
+    const ev = effectiveVerdict(row);
+    let inner = '';
+    if (ev.state === 'compliant') {
+      inner = '<div class="row"><span class="k">Verdict</span><span style="color:var(--c-low)">Compliant — no prohibited pattern matched.</span></div>';
+    } else {
+      const stds = ev.matches.map(m => `<div class="row"><span class="k">${escapeHtml(m.id)}</span><span>${escapeHtml(m.rationale)}</span></div>`).join('');
+      if (ev.state === 'exception') {
+        const e = ev.exc;
+        inner =
+          `<div class="row"><span class="k">Verdict</span><span style="color:var(--c-high)">Against policy — exception accepted${e.expiry ? ' (expires ' + escapeHtml(e.expiry) + ')' : ''}.</span></div>` +
+          stds +
+          `<div class="row"><span class="k">Justification</span><span>${escapeHtml(e.justification || '')}</span></div>` +
+          `<div class="row"><span class="k">Risk acceptor</span><span>${escapeHtml(e.owner || '—')}</span></div>` +
+          `<div class="row"><span class="k">Recorded</span><span>${escapeHtml(e.created || '—')}${e.expiry ? ' · expires ' + escapeHtml(e.expiry) : ' · no expiry'}</span></div>` +
+          `<div class="row"><span class="k"></span><span><button class="exc-btn" data-exc-action="clear">Remove exception</button></span></div>`;
+      } else {
+        inner =
+          `<div class="row"><span class="k">Verdict</span><span style="color:var(--c-critical)">Against policy — open${ev.wasExpired ? ' (exception expired)' : ''}. Remediate the rule, or record a risk-accepted exception.</span></div>` +
+          stds +
+          `<div class="row"><span class="k"></span><span><button class="exc-btn" data-exc-action="record">Record exception…</button></span></div>`;
+      }
+    }
+    return '<div class="detail-section" style="margin-top:12px;"><h4>Policy compliance</h4><div class="score-explain">' + inner + '</div></div>';
   }
 
   function buildDetailRow(row) {
@@ -399,8 +502,19 @@
     html += `<div class="row" style="margin-top:6px; padding-top:6px; border-top:1px solid var(--border-soft);"><span class="k">Logging</span><span style="${s.logging.flagged ? 'color:' + (s.logging.severity === 'high' ? 'var(--c-critical)' : 'var(--c-high)') : ''}">${escapeHtml(s.logging.label)}</span></div>`;
     html += '</div></div>';
 
+    // Policy compliance section (gate, independent of the score).
+    html += renderPolicySection(row);
+
     html += '</div>';
     td.innerHTML = html;
+    // Wire exception buttons (delegated, stop row-collapse).
+    td.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('[data-exc-action]');
+      if (!btn) return;
+      ev.stopPropagation();
+      if (btn.getAttribute('data-exc-action') === 'record') recordException(row);
+      else if (btn.getAttribute('data-exc-action') === 'clear') clearException(row);
+    });
     tr.appendChild(td);
     return tr;
   }

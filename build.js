@@ -50,6 +50,7 @@ function sharedModules() {
     read('shared', 'logging.js'),
     read('shared', 'registry.js'),
     read('shared', 'risk.js'),
+    read('shared', 'policy.js'), // uses buybackKeyForCombo from risk.js
   ].join('\n');
 }
 

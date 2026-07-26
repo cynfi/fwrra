@@ -240,7 +240,7 @@ function asaBuybackRecord(config, entry, index) {
     srcResolved,
     dstResolved,
     services,
-    isAnyPort: services.some(c => !c.destPort),
+    isAnyPort: servicesAreUnrestricted(services),
     isAnyDest: dstResolved.kind === 'any',
   };
 }
@@ -299,6 +299,13 @@ function buildRuleset(config, options) {
         // Buyback credit is direction-independent; the in-context floor uses this
         // application's own exposure/score.
         if (buyback) Object.assign(scored, applyBuyback(scored, buyback));
+        // Policy verdict (gate, independent of the score).
+        scored.policyVerdict = evaluatePolicy({
+          action: scored.action,
+          direction: scored.direction,
+          services: scored.services,
+          isAnyPort: servicesAreUnrestricted(scored.services),
+        });
         rows.push({
           id: ruleId++,
           type: 'rule',

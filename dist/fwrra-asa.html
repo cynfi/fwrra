@@ -188,6 +188,18 @@
     font-family: var(--mono); font-size: 10px; font-weight: 700; color: var(--c-low);
     margin-left: 6px; white-space: nowrap; opacity: 0.9;
   }
+  .policy-pill {
+    font-family: var(--mono); font-size: 10px; font-weight: 700; border-radius: 4px;
+    padding: 1px 5px; margin-left: 6px; white-space: nowrap;
+  }
+  .policy-open { color: var(--c-critical); border: 1px solid var(--c-critical); }
+  .policy-exc { color: var(--c-high); border: 1px solid var(--c-high); }
+  .exc-btn {
+    font-family: var(--mono); font-size: 11px; cursor: pointer;
+    background: var(--bg-elev, #1b1f2a); color: var(--text-bright, #e6e6e6);
+    border: 1px solid var(--border, #2a2f3a); border-radius: 4px; padding: 3px 9px;
+  }
+  .exc-btn:hover { border-color: var(--c-high); }
   .action-permit { color: var(--c-low); font-weight: 600; font-family: var(--mono); font-size: 11.5px; text-transform: uppercase; }
   .action-deny { color: var(--text-dim); font-weight: 600; font-family: var(--mono); font-size: 11.5px; text-transform: uppercase; }
 
@@ -320,6 +332,12 @@
         <option value="all">Any logging status</option>
         <option value="unlogged">No logging only</option>
         <option value="logged">Logged only</option>
+      </select>
+      <select id="filterPolicy">
+        <option value="all">Any policy status</option>
+        <option value="against">Against policy (open)</option>
+        <option value="exception">Exception accepted</option>
+        <option value="compliant">Compliant only</option>
       </select>
       <label class="toggle-label" for="showInactiveToggle">
         <input type="checkbox" id="showInactiveToggle">
@@ -833,6 +851,19 @@ function buybackKeyForCombo(combo) {
   return `${combo.protocol.toLowerCase()}/${combo.destPort}`;
 }
 
+// "Unrestricted" for policy/buyback purposes means the rule permits ALL ports on
+// TCP/UDP, or ALL protocols (bare IP) — i.e. the high-risk ports are genuinely
+// in scope. A portless protocol like ICMP/GRE having a null port does NOT make a
+// rule unrestricted (a rule permitting HTTP+HTTPS+ICMP is not "any service").
+function servicesAreUnrestricted(services) {
+  return (services || []).some(c => {
+    const p = (c.protocol || '').toLowerCase();
+    if (p === 'ip') return true;
+    if ((p === 'tcp' || p === 'udp' || p === 'tcp-udp') && c.destPort == null) return true;
+    return false;
+  });
+}
+
 // --- matching primitives (loose, intentionally not a full path/shadow sim) ---
 function intfSetOverlap(a, b) {
   if (!a || !a.length || a.includes('any')) return true;   // wildcard side
@@ -927,6 +958,87 @@ function applyBuyback(scored, buyback) {
     inContextBand: riskBand(inContext),
     buyback,
   };
+}
+
+// ============================================================
+// Policy standard (deny-by-default) + verdict engine (DESIGN.md §5-6)
+// ============================================================
+// A declarative, user-editable standard: a list of prohibited traffic patterns
+// keyed on rule DIRECTION (ingress/egress/internal, from the direction model)
+// and SERVICE (well-known port groups). The verdict is a governance GATE,
+// independent of the graduated risk score — a rule can be low-scoring yet
+// against policy (e.g. inbound NetBIOS from the internet). This engine is
+// vendor-neutral and DOM-free so it is portable into a separate firewall-rule-
+// request / change-control tool, where each proposed rule is evaluated the same
+// way an existing rule is in audit.
+//
+// A verdict of `against-policy` is NOT an auto-reject: it is a finding that
+// triggers either remediation or a documented, time-bound exception (risk
+// acceptance). The exception store itself is app-specific (ui.js keeps one in
+// localStorage); this engine only decides compliant vs against-policy.
+
+// Named port groups the standards reference (keys are `protocol/port`, matching
+// the buyback/service-risk keying). Tunable, like the buyback tiers.
+const POLICY_PORT_GROUPS = {
+  remoteAccess: ['tcp/22', 'tcp/23', 'tcp/3389', 'tcp/5900', 'tcp/512', 'tcp/445', 'tcp/139'],
+  fileTransfer: ['tcp/445', 'tcp/139', 'tcp/21', 'tcp/20', 'udp/69'],
+  snmp: ['udp/161', 'udp/162'],
+  dataStores: ['tcp/1433', 'tcp/3306', 'tcp/5432', 'tcp/6379', 'tcp/27017', 'tcp/9200', 'tcp/9300', 'tcp/6443', 'tcp/10250', 'tcp/2375'],
+  backdoor: ['tcp/12345', 'tcp/12346', 'tcp/1', 'udp/1', 'tcp/7', 'udp/7', 'tcp/9', 'udp/9', 'tcp/11', 'tcp/13', 'udp/13', 'tcp/15', 'tcp/19', 'udp/19', 'tcp/79', 'tcp/60001'],
+};
+
+// Shipped defaults. `direction`: 'ingress' | 'egress' | 'internal' | 'any'.
+// `services`: array of `protocol/port` keys, or the literal 'any' (matches a
+// permit that allows any port). Org-editable; this is a starting point.
+// `services: 'any'` matches an unrestricted (any-port) permit — the single
+// "unrestricted access" finding for a broad rule. Port-specific entries match a
+// rule that EXPLICITLY names a prohibited port (the smoking-gun case) and do NOT
+// also fire on any-port rules — otherwise every broad rule would match every
+// port group at once. The any-service entries (FW-STD-02 ingress, FW-STD-07
+// egress) already capture that a broad rule includes the prohibited ports.
+const DEFAULT_POLICY_STANDARD = [
+  { id: 'FW-STD-01', direction: 'ingress', services: POLICY_PORT_GROUPS.remoteAccess,
+    rationale: 'Remote-access / file-share ports must not be reachable from untrusted (internet) sources.' },
+  { id: 'FW-STD-02', direction: 'ingress', services: 'any',
+    rationale: 'No unrestricted (any-service) inbound access from the internet — this implicitly exposes every high-risk port.' },
+  { id: 'FW-STD-03', direction: 'ingress', services: POLICY_PORT_GROUPS.snmp,
+    rationale: 'SNMP must not be reachable from the internet (info disclosure / device reconfiguration with weak community strings).' },
+  { id: 'FW-STD-04', direction: 'ingress', services: POLICY_PORT_GROUPS.dataStores,
+    rationale: 'Databases / infrastructure control planes must not be exposed inbound from the internet.' },
+  { id: 'FW-STD-05', direction: 'any', services: POLICY_PORT_GROUPS.backdoor,
+    rationale: 'Backdoor / no-legitimate-use ports must not be explicitly permitted in any direction.' },
+  { id: 'FW-STD-06', direction: 'egress', services: POLICY_PORT_GROUPS.fileTransfer,
+    rationale: 'High-risk file-transfer ports outbound to the internet are an exfiltration path and require an exception.' },
+  { id: 'FW-STD-07', direction: 'egress', services: 'any',
+    rationale: 'Unrestricted (any-service) outbound to the internet should be narrowed to required ports — it implicitly permits high-risk exfil and backdoor ports.' },
+];
+
+// Does a permit rule EXPLICITLY name this protocol/port? (Any-port permits are
+// handled by the dedicated `services: 'any'` standards, not here.)
+function ruleExplicitlyPermitsPort(rule, key) {
+  return (rule.services || []).some(c => buybackKeyForCombo(c) === key);
+}
+
+function policyDirectionMatches(entryDir, ruleDir) {
+  return entryDir === 'any' || entryDir === ruleDir;
+}
+
+// Evaluate a rule against the standard. `rule` needs { action, direction,
+// services (resolved combos), isAnyPort }. Only permits can violate; denies
+// (which enforce policy) are compliant. Returns { verdict, matches:[{id,
+// rationale}] } where verdict is 'compliant' | 'against-policy'.
+function evaluatePolicy(rule, standard) {
+  standard = standard || DEFAULT_POLICY_STANDARD;
+  if (rule.action !== 'permit') return { verdict: 'compliant', matches: [] };
+  const matches = [];
+  for (const e of standard) {
+    if (!policyDirectionMatches(e.direction, rule.direction)) continue;
+    let hit;
+    if (e.services === 'any') hit = !!rule.isAnyPort;
+    else hit = !rule.isAnyPort && e.services.some(k => ruleExplicitlyPermitsPort(rule, k));
+    if (hit) matches.push({ id: e.id, rationale: e.rationale });
+  }
+  return { verdict: matches.length ? 'against-policy' : 'compliant', matches };
 }
 
 // ---- vendor engine: asa ----
@@ -1492,7 +1604,7 @@ function asaBuybackRecord(config, entry, index) {
     srcResolved,
     dstResolved,
     services,
-    isAnyPort: services.some(c => !c.destPort),
+    isAnyPort: servicesAreUnrestricted(services),
     isAnyDest: dstResolved.kind === 'any',
   };
 }
@@ -1551,6 +1663,13 @@ function buildRuleset(config, options) {
         // Buyback credit is direction-independent; the in-context floor uses this
         // application's own exposure/score.
         if (buyback) Object.assign(scored, applyBuyback(scored, buyback));
+        // Policy verdict (gate, independent of the score).
+        scored.policyVerdict = evaluatePolicy({
+          action: scored.action,
+          direction: scored.direction,
+          services: scored.services,
+          isAnyPort: servicesAreUnrestricted(scored.services),
+        });
         rows.push({
           id: ruleId++,
           type: 'rule',
@@ -1740,6 +1859,7 @@ registerVendor({
   const filterLogging = document.getElementById('filterLogging');
   const showInactiveToggle = document.getElementById('showInactiveToggle');
   const roleSelect = document.getElementById('roleSelect');
+  const filterPolicy = document.getElementById('filterPolicy');
   const searchBox = document.getElementById('searchBox');
   const footerNote = document.getElementById('footerNote');
   const fileInfoName = document.getElementById('fileInfoName');
@@ -1830,10 +1950,15 @@ registerVendor({
     const bands = { Critical: 0, High: 0, Medium: 0, Low: 0, None: 0 };
     let implicitCount = 0;
     let unloggedCount = 0;
+    let againstOpen = 0;
+    let exceptions = 0;
     for (const r of ruleRows) {
       bands[r.scored.band.label] = (bands[r.scored.band.label] || 0) + 1;
       if (r.implicit) implicitCount++;
       if (r.scored.logging.flagged) unloggedCount++;
+      const ev = effectiveVerdict(r);
+      if (ev.state === 'open') againstOpen++;
+      else if (ev.state === 'exception') exceptions++;
     }
     summaryEl.innerHTML = `
       <div class="cell"><div class="n">${ruleRows.length}</div><div class="l">Total rules</div></div>
@@ -1841,6 +1966,8 @@ registerVendor({
       <div class="cell high"><div class="n">${bands.High}</div><div class="l">High</div></div>
       <div class="cell med"><div class="n">${bands.Medium}</div><div class="l">Medium</div></div>
       <div class="cell low"><div class="n">${bands.Low}</div><div class="l">Low</div></div>
+      <div class="cell"><div class="n" style="color:${againstOpen ? 'var(--c-critical)' : 'var(--text-bright)'}">${againstOpen}</div><div class="l">Against policy</div></div>
+      <div class="cell"><div class="n" style="color:${exceptions ? 'var(--c-high)' : 'var(--text-bright)'}">${exceptions}</div><div class="l">Exceptions</div></div>
       <div class="cell"><div class="n" style="color:${implicitCount ? 'var(--c-critical)' : 'var(--text-bright)'}">${implicitCount}</div><div class="l">Implicit permits</div></div>
       <div class="cell"><div class="n" style="color:${unloggedCount ? 'var(--c-medium)' : 'var(--text-bright)'}">${unloggedCount}</div><div class="l">No logging</div></div>
     `;
@@ -1884,6 +2011,7 @@ registerVendor({
   filterAction.addEventListener('change', renderTable);
   filterImplicit.addEventListener('change', renderTable);
   filterLogging.addEventListener('change', renderTable);
+  if (filterPolicy) filterPolicy.addEventListener('change', renderTable);
   if (roleSelect) {
     // Changing the firewall role re-scores every rule (direction-aware
     // exposure), so rebuild the ruleset from the already-parsed config and
@@ -1945,6 +2073,12 @@ registerVendor({
     if (filterImplicit.value === 'explicit' && row.implicit) return false;
     if (filterLogging.value === 'unlogged' && !s.logging.flagged) return false;
     if (filterLogging.value === 'logged' && s.logging.flagged) return false;
+    if (filterPolicy && filterPolicy.value !== 'all') {
+      const state = effectiveVerdict(row).state;
+      if (filterPolicy.value === 'against' && state !== 'open') return false;
+      if (filterPolicy.value === 'exception' && state !== 'exception') return false;
+      if (filterPolicy.value === 'compliant' && state !== 'compliant') return false;
+    }
     const q = searchBox.value.trim().toLowerCase();
     if (q) {
       const haystack = [
@@ -2037,7 +2171,7 @@ registerVendor({
         </div>
         <div class="risk-band-pill" style="background:${band.color}22; color:${band.color}; border:1px solid ${band.color}55;">${band.label}</div>
       </td>
-      <td><span class="${s.action === 'permit' ? 'action-permit' : 'action-deny'}">${s.action}</span>${row.inactive ? '<span class="inactive-tag">INACTIVE</span>' : ''}</td>
+      <td><span class="${s.action === 'permit' ? 'action-permit' : 'action-deny'}">${s.action}</span>${row.inactive ? '<span class="inactive-tag">INACTIVE</span>' : ''}${policyPill(row)}</td>
       <td class="mono">${(s.services[0] && s.services[0].protocol ? s.services[0].protocol : 'ip').toUpperCase()}</td>
       <td class="mono">${escapeHtml(endpointText(s.srcResolved))}</td>
       <td class="mono">${escapeHtml(endpointText(s.dstResolved))}</td>
@@ -2058,6 +2192,94 @@ registerVendor({
     if (EXPANDED.has(id)) EXPANDED.delete(id);
     else EXPANDED.add(id);
     renderTable();
+  }
+
+  // ---- policy verdict + exceptions (localStorage-backed, tri-state) ----
+  // An `against-policy` finding is not a hard block: it can carry a documented,
+  // time-bound exception (risk acceptance). Exceptions are stored locally,
+  // keyed by a stable rule identity, and expire.
+  const EXC_STORE_KEY = 'fwrra-policy-exceptions';
+  function loadExceptions() {
+    try { return JSON.parse(localStorage.getItem(EXC_STORE_KEY) || '{}'); } catch (e) { return {}; }
+  }
+  function saveExceptions(o) {
+    try { localStorage.setItem(EXC_STORE_KEY, JSON.stringify(o)); } catch (e) { /* storage disabled */ }
+  }
+  function ruleKey(row) {
+    const s = row.scored;
+    const svc = (s.services || []).map(c => `${c.protocol}/${c.destPort || 'any'}`).join(',');
+    return [CURRENT_VENDOR ? CURRENT_VENDOR.id : '', row.aclName || '', row.ruleNumber || '', s.direction || '', svc].join('|');
+  }
+  function getException(row) {
+    const exc = loadExceptions()[ruleKey(row)];
+    if (!exc) return null;
+    const expired = exc.expiry && Date.parse(exc.expiry) < Date.now();
+    return Object.assign({}, exc, { expired });
+  }
+  // Effective verdict state: 'compliant' | 'open' | 'exception'
+  function effectiveVerdict(row) {
+    const v = row.scored.policyVerdict;
+    if (!v || v.verdict !== 'against-policy') return { state: 'compliant', matches: v ? v.matches : [] };
+    const exc = getException(row);
+    if (exc && !exc.expired) return { state: 'exception', matches: v.matches, exc };
+    return { state: 'open', matches: v.matches, exc: exc || null, wasExpired: !!(exc && exc.expired) };
+  }
+  function recordException(row) {
+    const justification = prompt('Exception — business justification for this against-policy rule:');
+    if (!justification) return;
+    const owner = prompt('Risk acceptor / owner (who signs off):') || '';
+    const daysStr = prompt('Expires in how many days?', '90');
+    const days = parseInt(daysStr, 10);
+    const expiry = (!isNaN(days) && days > 0) ? new Date(Date.now() + days * 86400000).toISOString().slice(0, 10) : '';
+    const store = loadExceptions();
+    store[ruleKey(row)] = { justification, owner, created: new Date().toISOString().slice(0, 10), expiry };
+    saveExceptions(store);
+    renderSummary();
+    renderTable();
+  }
+  function clearException(row) {
+    const store = loadExceptions();
+    delete store[ruleKey(row)];
+    saveExceptions(store);
+    renderSummary();
+    renderTable();
+  }
+  function policyPill(row) {
+    const ev = effectiveVerdict(row);
+    if (ev.state === 'compliant') return '';
+    if (ev.state === 'exception') {
+      return `<span class="policy-pill policy-exc" title="Against policy, with an accepted exception${ev.exc && ev.exc.expiry ? ' (expires ' + escapeHtml(ev.exc.expiry) + ')' : ''}.">EXCEPTION</span>`;
+    }
+    const ids = ev.matches.map(m => m.id).join(', ');
+    return `<span class="policy-pill policy-open" title="Against policy: ${escapeHtml(ids)}${ev.wasExpired ? ' (exception expired)' : ''}.">⚠ POLICY</span>`;
+  }
+
+  function renderPolicySection(row) {
+    const v = row.scored.policyVerdict;
+    if (!v) return '';
+    const ev = effectiveVerdict(row);
+    let inner = '';
+    if (ev.state === 'compliant') {
+      inner = '<div class="row"><span class="k">Verdict</span><span style="color:var(--c-low)">Compliant — no prohibited pattern matched.</span></div>';
+    } else {
+      const stds = ev.matches.map(m => `<div class="row"><span class="k">${escapeHtml(m.id)}</span><span>${escapeHtml(m.rationale)}</span></div>`).join('');
+      if (ev.state === 'exception') {
+        const e = ev.exc;
+        inner =
+          `<div class="row"><span class="k">Verdict</span><span style="color:var(--c-high)">Against policy — exception accepted${e.expiry ? ' (expires ' + escapeHtml(e.expiry) + ')' : ''}.</span></div>` +
+          stds +
+          `<div class="row"><span class="k">Justification</span><span>${escapeHtml(e.justification || '')}</span></div>` +
+          `<div class="row"><span class="k">Risk acceptor</span><span>${escapeHtml(e.owner || '—')}</span></div>` +
+          `<div class="row"><span class="k">Recorded</span><span>${escapeHtml(e.created || '—')}${e.expiry ? ' · expires ' + escapeHtml(e.expiry) : ' · no expiry'}</span></div>` +
+          `<div class="row"><span class="k"></span><span><button class="exc-btn" data-exc-action="clear">Remove exception</button></span></div>`;
+      } else {
+        inner =
+          `<div class="row"><span class="k">Verdict</span><span style="color:var(--c-critical)">Against policy — open${ev.wasExpired ? ' (exception expired)' : ''}. Remediate the rule, or record a risk-accepted exception.</span></div>` +
+          stds +
+          `<div class="row"><span class="k"></span><span><button class="exc-btn" data-exc-action="record">Record exception…</button></span></div>`;
+      }
+    }
+    return '<div class="detail-section" style="margin-top:12px;"><h4>Policy compliance</h4><div class="score-explain">' + inner + '</div></div>';
   }
 
   function buildDetailRow(row) {
@@ -2115,8 +2337,19 @@ registerVendor({
     html += `<div class="row" style="margin-top:6px; padding-top:6px; border-top:1px solid var(--border-soft);"><span class="k">Logging</span><span style="${s.logging.flagged ? 'color:' + (s.logging.severity === 'high' ? 'var(--c-critical)' : 'var(--c-high)') : ''}">${escapeHtml(s.logging.label)}</span></div>`;
     html += '</div></div>';
 
+    // Policy compliance section (gate, independent of the score).
+    html += renderPolicySection(row);
+
     html += '</div>';
     td.innerHTML = html;
+    // Wire exception buttons (delegated, stop row-collapse).
+    td.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('[data-exc-action]');
+      if (!btn) return;
+      ev.stopPropagation();
+      if (btn.getAttribute('data-exc-action') === 'record') recordException(row);
+      else if (btn.getAttribute('data-exc-action') === 'clear') clearException(row);
+    });
     tr.appendChild(td);
     return tr;
   }

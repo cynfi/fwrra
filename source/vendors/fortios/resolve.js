@@ -317,13 +317,23 @@ function fortiBuildRuleset(config, options) {
     srcResolved: e.scored.srcResolved,
     dstResolved: e.scored.dstResolved,
     services: e.scored.services,
-    isAnyPort: e.scored.services.some(c => !c.destPort),
+    // "unrestricted" = permits all TCP/UDP ports or all IP protocols (portless
+    // protocols like ICMP alone do NOT count). Drives buyback port eligibility
+    // and the policy any-service standards.
+    isAnyPort: servicesAreUnrestricted(e.scored.services),
     isAnyDest: !!(e.scored.dstResolved && e.scored.dstResolved.kind === 'any'),
   }));
   scoredList.forEach((e, i) => {
     if (e.scored.action === 'permit') {
       Object.assign(e.scored, applyBuyback(e.scored, computeRuleBuyback(records[i], records)));
     }
+    // Policy verdict (gate, independent of the score).
+    e.scored.policyVerdict = evaluatePolicy({
+      action: e.scored.action,
+      direction: e.scored.direction,
+      services: e.scored.services,
+      isAnyPort: records[i].isAnyPort,
+    });
   });
 
   // Pass 3: assemble display rows.

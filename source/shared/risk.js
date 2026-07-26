@@ -417,6 +417,19 @@ function buybackKeyForCombo(combo) {
   return `${combo.protocol.toLowerCase()}/${combo.destPort}`;
 }
 
+// "Unrestricted" for policy/buyback purposes means the rule permits ALL ports on
+// TCP/UDP, or ALL protocols (bare IP) — i.e. the high-risk ports are genuinely
+// in scope. A portless protocol like ICMP/GRE having a null port does NOT make a
+// rule unrestricted (a rule permitting HTTP+HTTPS+ICMP is not "any service").
+function servicesAreUnrestricted(services) {
+  return (services || []).some(c => {
+    const p = (c.protocol || '').toLowerCase();
+    if (p === 'ip') return true;
+    if ((p === 'tcp' || p === 'udp' || p === 'tcp-udp') && c.destPort == null) return true;
+    return false;
+  });
+}
+
 // --- matching primitives (loose, intentionally not a full path/shadow sim) ---
 function intfSetOverlap(a, b) {
   if (!a || !a.length || a.includes('any')) return true;   // wildcard side
