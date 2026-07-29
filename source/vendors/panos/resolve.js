@@ -300,6 +300,13 @@ function panBuildRuleset(config, options) {
 // ============================================================
 function detectPanOSConfig(text) {
   let score = 0;
+  // XML running-config export.
+  if (/^﻿?\s*<\?xml/i.test(text) || /^﻿?\s*<config\b/i.test(text)) {
+    if (/<rulebase\b[\s\S]*?<security\b/i.test(text)) score += 4;
+    if (/<devices\b[\s\S]*?<vsys\b/i.test(text)) score += 2;
+    if (/urldb="paloaltonetworks"/i.test(text) || /paloaltonetworks/i.test(text)) score += 2;
+    if (score) return score; // an XML config is unambiguously PAN-OS here
+  }
   if (/^set\s+.*\brulebase\s+security\s+rules\s/m.test(text)) score += 3;
   if (/^set\s+zone\s+\S+\s+network/m.test(text)) score += 2;
   if (/^set\s+address\s+\S+\s+ip-netmask/m.test(text)) score += 1;

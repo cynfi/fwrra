@@ -257,7 +257,9 @@ policy verdict, exceptions) is built once in `shared/`.
   `application any` fallback to "any port."
 - Parse **set format** first (`set rulebase security rules <name> from <zone>
   to <zone> source … destination … application … service … action allow|deny`);
-  XML export support can come later.
+  XML `running-config` export support **[DONE]** — `parsePanOSConfig()` sniffs
+  the format and routes XML through a DOMParser-based path that yields the same
+  `config` shape (pbf/nat rulebases skipped, NAT still out of scope).
 
 ---
 
@@ -279,7 +281,8 @@ additive step against the now-stable contract.
      computation, exception data model, audit-gap + hardening surfaces in
      `ui.js`.
 - **Phase 2 — PAN-OS. [DONE]** `vendors/panos/` parser (set format, one
-  attribute per line) + resolve supplying the same zone-trust/direction/
+  attribute per line, plus the XML `running-config` export parsed via the
+  platform DOMParser into the same shape) + resolve supplying the same zone-trust/direction/
   service-identity contract, with a `PANOS_APPID_PORTS` map so
   `application-default` rules score on their App-ID's real ports (e.g.
   `application ms-rdp` → tcp/3389, correctly triggering the remote-access-

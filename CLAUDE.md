@@ -93,8 +93,11 @@ source/
     panos/
       parser.js                 # parsePanOSConfig(text) -> {interfaces, zones,
                                  # addresses, addressGroups, services,
-                                 # serviceGroups, rules, routes} — Palo Alto
-                                 # "set" format (one attribute per line)
+                                 # serviceGroups, rules, routes} — accepts both
+                                 # the Palo Alto "set" format (one attribute per
+                                 # line) and the XML running-config export
+                                 # (parsed via the platform DOMParser into the
+                                 # same shape; pbf/nat rulebases skipped)
       resolve.js                 # PAN-OS-specific: PANOS_APPID_PORTS map (so
                                   # application-default rules score on their
                                   # App-ID's real ports), zone trust from
