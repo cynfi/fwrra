@@ -103,8 +103,10 @@ source/
                                   # App-ID's real ports), zone trust from
                                   # default-route egress + zone-name, default-
                                   # deny (no synthesis), panClassifyLogging
-                                  # (log-end/log-start), panBuildRuleset, and
-                                  # detectPanOSConfig() + registerVendor()
+                                  # (log-end/log-start), negate-source/-dest ->
+                                  # resolved.negated (complement breadth +
+                                  # geofence buyback, see below), panBuildRuleset,
+                                  # and detectPanOSConfig() + registerVendor()
   ui.js                        # all DOM code: file handling, table
                                 # rendering, sort/filter, expand/collapse,
                                 # CSV export. Vendor-neutral — calls
@@ -287,6 +289,27 @@ with them unless a vendor's model genuinely doesn't fit:
   FQDN objects, dynamic address groups) should resolve down to the
   closest fit in this vocabulary rather than inventing a parallel scoring
   path.
+- **Negated endpoints (allow-lists / geofencing).** A rule endpoint can be
+  *negated* (PAN-OS `negate-source`/`negate-destination`; FortiOS
+  `srcaddr-negate` when added), meaning it matches everything EXCEPT the listed
+  set. The shared engine models this with a `negated: true` flag on the resolved
+  endpoint (a modifier on the existing vocabulary, **not** a new `kind`):
+  `estimateAddressCount()` returns the **complement** (`2^32 − listed`), so
+  "source = NOT (US + friendly countries)" scores as near-`any` breadth, not the
+  small friendly-country group's breadth — which is what makes both a geofence
+  deny and a negated allow score correctly (and why "any new country is blocked"
+  holds). A negated endpoint never takes the indiscriminate-subnet penalty (it's
+  a complement, not a raw CIDR). `scopeLabel()` renders `not(...)`; `ui.js`
+  prefixes `NOT ` and flags the member tree. The **geofence buyback**
+  (`BUYBACK_GEOFENCE_PER`/`_CAP` in `shared/risk.js`) is the negated-allow-list
+  analogue of the threat-geo buyback: a preceding enabled `deny` with a negated
+  source/destination credits a later permit that is broad on that same axis
+  (moderate, ≈8, capped 16). Per a user governance decision it **respects the
+  exposure floor** like the other buybacks — so a classic geofenced *any-source*
+  leftover permit keeps its exposure score (the credit is recorded and shown in
+  the buyback breakdown but does not pierce exposure); the credit only moves the
+  number when the permit's other axis pulls exposure below 100. Don't change the
+  floor behavior or the credit magnitude without checking in.
 - **Indiscriminate-subnet penalty**: a small set of services
   (`subnetPenaltyEligible: true` in `SERVICE_RISK_TABLE`) get an
   additional, explicit penalty when either endpoint is a **raw CIDR

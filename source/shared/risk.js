@@ -136,11 +136,27 @@ function lookupServiceRisk(protocol, destPort) {
 // counts (so a 300-host group scores meaningfully broader than a 3-host
 // group) rather than just the narrowest member, which the old bucket model
 // couldn't distinguish.
+const TOTAL_IPV4 = 4294967296; // 2^32
+
+// A `negated: true` endpoint (PAN-OS negate-source/negate-destination, FortiOS
+// srcaddr-negate) matches everything EXCEPT the listed addresses, so its true
+// address-space breadth is the COMPLEMENT of what's listed. This is what makes a
+// geofence rule score correctly: "source = NOT (US + friendly countries)" is a
+// near-`any` source (the whole internet minus a handful of country ranges), not
+// the small breadth of that friendly-country group — and "any new country is
+// blocked" precisely because it falls in the complement. Scoring the listed set
+// instead would drastically understate an allow, or misrepresent the deny.
 function estimateAddressCount(resolvedEndpoint) {
   if (!resolvedEndpoint) return 1;
+  const raw = estimateAddressCountRaw(resolvedEndpoint);
+  if (resolvedEndpoint.negated) return Math.max(1, TOTAL_IPV4 - raw);
+  return raw;
+}
+
+function estimateAddressCountRaw(resolvedEndpoint) {
   switch (resolvedEndpoint.kind) {
     case 'any':
-      return 4294967296; // 2^32
+      return TOTAL_IPV4;
     case 'host':
     case 'fqdn':
     case 'literal':
@@ -155,7 +171,7 @@ function estimateAddressCount(resolvedEndpoint) {
     case 'group': {
       let total = 0;
       for (const mem of resolvedEndpoint.members) {
-        if (mem.kind === 'any') return 4294967296;
+        if (mem.kind === 'any') return TOTAL_IPV4;
         total += estimateAddressCount(mem);
       }
       return total || 1;
@@ -177,12 +193,14 @@ function addressCountToBreadth(count) {
 function classifyEndpointScope(resolvedEndpoint) {
   const breadth = addressCountToBreadth(estimateAddressCount(resolvedEndpoint));
   if (!resolvedEndpoint) return { kind: 'unknown', prefixLen: null, breadth: 0 };
-  if (resolvedEndpoint.kind === 'any') return { kind: 'any', prefixLen: 0, breadth };
-  if (resolvedEndpoint.kind === 'host') return { kind: 'host', prefixLen: 32, breadth };
-  if (resolvedEndpoint.kind === 'subnet') return { kind: 'subnet', prefixLen: resolvedEndpoint.prefixLen, breadth };
-  if (resolvedEndpoint.kind === 'range') return { kind: 'range', prefixLen: null, breadth };
-  if (resolvedEndpoint.kind === 'fqdn' || resolvedEndpoint.kind === 'literal') return { kind: 'host', prefixLen: 32, breadth };
-  if (resolvedEndpoint.kind === 'group') {
+  const negated = !!resolvedEndpoint.negated;
+  let scope;
+  if (resolvedEndpoint.kind === 'any') scope = { kind: 'any', prefixLen: 0, breadth };
+  else if (resolvedEndpoint.kind === 'host') scope = { kind: 'host', prefixLen: 32, breadth };
+  else if (resolvedEndpoint.kind === 'subnet') scope = { kind: 'subnet', prefixLen: resolvedEndpoint.prefixLen, breadth };
+  else if (resolvedEndpoint.kind === 'range') scope = { kind: 'range', prefixLen: null, breadth };
+  else if (resolvedEndpoint.kind === 'fqdn' || resolvedEndpoint.kind === 'literal') scope = { kind: 'host', prefixLen: 32, breadth };
+  else if (resolvedEndpoint.kind === 'group') {
     // worst case = broadest member (lowest prefixLen / any present), used only for the display label
     let worst = { kind: 'host', prefixLen: 32 };
     for (const mem of resolvedEndpoint.members) {
@@ -191,9 +209,10 @@ function classifyEndpointScope(resolvedEndpoint) {
       if (c.prefixLen !== null && (worst.prefixLen === null || c.prefixLen < worst.prefixLen)) worst = c;
     }
     const kind = worst.kind === 'host' && resolvedEndpoint.members.length > 1 ? 'group-multi-host' : worst.kind;
-    return { kind, prefixLen: worst.prefixLen, breadth };
-  }
-  return { kind: 'unknown', prefixLen: null, breadth: 0 };
+    scope = { kind, prefixLen: worst.prefixLen, breadth };
+  } else scope = { kind: 'unknown', prefixLen: null, breadth: 0 };
+  scope.negated = negated;
+  return scope;
 }
 
 function maskToPrefixLen(mask) {
@@ -207,12 +226,14 @@ function maskToPrefixLen(mask) {
 }
 
 function scopeLabel(scope) {
-  if (scope.kind === 'any') return 'any';
-  if (scope.kind === 'host') return 'host';
-  if (scope.kind === 'subnet') return `subnet/${scope.prefixLen ?? '?'}`;
-  if (scope.kind === 'group-multi-host') return 'group';
-  if (scope.kind === 'range') return 'range';
-  return scope.kind;
+  let base;
+  if (scope.kind === 'any') base = 'any';
+  else if (scope.kind === 'host') base = 'host';
+  else if (scope.kind === 'subnet') base = `subnet/${scope.prefixLen ?? '?'}`;
+  else if (scope.kind === 'group-multi-host') base = 'group';
+  else if (scope.kind === 'range') base = 'range';
+  else base = scope.kind;
+  return scope.negated ? `not(${base})` : base;
 }
 
 // A raw CIDR subnet larger than /30 (more than 4 addresses) is "indiscriminate" --
@@ -225,7 +246,9 @@ function scopeLabel(scope) {
 const SUBNET_PENALTY_FREE_HOST_BITS = 2; // /30 and tighter (<=4 addresses) are exempt
 
 function subnetPenaltyFor(scope, eligible) {
-  if (!eligible || scope.kind !== 'subnet') return 0;
+  // A negated endpoint is the COMPLEMENT of a listed set, not a raw
+  // indiscriminate subnet, so the exponential subnet penalty never applies.
+  if (!eligible || scope.kind !== 'subnet' || scope.negated) return 0;
   const pfx = scope.prefixLen;
   if (pfx === null || pfx === undefined) return 0;
   const hostBits = 32 - pfx;
@@ -237,6 +260,7 @@ function subnetPenaltyFor(scope, eligible) {
 // contribution is excluded from the blend below so its size isn't counted
 // twice (once gently via breadth, once steeply via the penalty).
 function effectiveBreadth(scope, eligible) {
+  if (scope.negated) return scope.breadth; // complement set: keep its (near-any) breadth, no subnet double-count
   if (eligible && scope.kind === 'subnet') {
     const pfx = scope.prefixLen;
     if (pfx !== null && pfx !== undefined && (32 - pfx) > SUBNET_PENALTY_FREE_HOST_BITS) return 0;
@@ -396,6 +420,16 @@ const BUYBACK_CREDIT = {
 const BUYBACK_GEO_PER = 6;   // credit per distinct threat-geo destination a matching deny blocks
 const BUYBACK_GEO_CAP = 18;  // max total geo credit
 
+// Geofence buyback: a preceding enabled deny whose source/destination is
+// NEGATED (an allow-list — "deny everything that is NOT these countries") has
+// already carved the hostile majority of that axis away before a later broad
+// permit. That permit is far less exposed than its `any` suggests. This is the
+// negated-allow-list analogue of the threat-geo buyback above: instead of a
+// deny naming the bad destinations, the deny names the *good* ones and negates.
+// Moderate + capped (respects the exposure floor in applyBuyback), tunable.
+const BUYBACK_GEOFENCE_PER = 8;   // credit per geofence deny carving an axis the permit is broad on
+const BUYBACK_GEOFENCE_CAP = 16;  // max total geofence credit
+
 // Recognize a threat-geo destination (blocked country ranges). Matches
 // geography-type objects (address 'geo:CN'/'geo:RU'/'geo:KP') and threat-named
 // groups/objects (RUSSIA/CHINA/KOREA/PROHIBITED/blocked-countries), recursively
@@ -462,11 +496,12 @@ function destCovers(denyDst, permitDst) {
 }
 
 // records: [{ index, action, enabled, srcintf, dstintf, srcResolved, dstResolved,
-//             services, isAnyPort, isAnyDest }] for the whole rulebase.
-// Returns the buyback for ONE permit record.
+//             services, isAnyPort, isAnyDest, isAnySource, srcNegated, dstNegated }]
+// for the whole rulebase. Returns the buyback for ONE permit record.
 function computeRuleBuyback(permit, records) {
   const blocked = new Map(); // buyback key -> points (dedup across denies)
   const geoNames = new Set();
+  const geofenceNames = new Set();
 
   for (const d of records) {
     if (d === permit) continue;
@@ -474,6 +509,19 @@ function computeRuleBuyback(permit, records) {
     if (d.index >= permit.index) continue;               // must be blocked FIRST
     if (!intfSetOverlap(d.srcintf, permit.srcintf)) continue;
     if (!intfSetOverlap(d.dstintf, permit.dstintf)) continue;
+
+    // Geofence buyback: a negated (allow-list) deny carves the hostile majority
+    // of an axis away first. Credit a later permit that is BROAD on that same
+    // axis (so the geofence is what's actually constraining it). Independent of
+    // the src-overlap / port / dest-cover checks the other credits require,
+    // because a source geofence restricts by source regardless of destination.
+    if (d.srcNegated && permit.isAnySource) {
+      geofenceNames.add('src:' + ((d.srcResolved && d.srcResolved.name) || 'source-allow-list'));
+    }
+    if (d.dstNegated && permit.isAnyDest) {
+      geofenceNames.add('dst:' + ((d.dstResolved && d.dstResolved.name) || 'dest-allow-list'));
+    }
+
     if (!endpointsOverlap(d.srcResolved, permit.srcResolved)) continue;
 
     // Port buyback: only meaningful if the permit actually allows a broad port
@@ -502,13 +550,16 @@ function computeRuleBuyback(permit, records) {
   }
   const portCredit = intSum + Math.ceil(fracSum);
   const geoCredit = Math.min(BUYBACK_GEO_CAP, geoNames.size * BUYBACK_GEO_PER);
+  const geofenceCredit = Math.min(BUYBACK_GEOFENCE_CAP, geofenceNames.size * BUYBACK_GEOFENCE_PER);
 
   return {
-    credit: portCredit + geoCredit,
+    credit: portCredit + geoCredit + geofenceCredit,
     portCredit,
     geoCredit,
+    geofenceCredit,
     blockedPorts,
     blockedGeo: Array.from(geoNames),
+    blockedGeofence: Array.from(geofenceNames),
   };
 }
 

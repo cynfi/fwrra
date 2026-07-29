@@ -120,9 +120,23 @@ high-risk slice out of `P`'s scope on any axis:
   strict subset of any) with overlapping source → credit.
 - **protocol/port** (port case): `P service=any`, `D service=SMB` with
   overlapping src/dst → credit for SMB.
+- **geofence / negated allow-list case**: `D` denies everything EXCEPT an
+  allow-list (a *negated* source/destination — PAN-OS `negate-source` /
+  `negate-destination`), i.e. "deny all sources that are NOT the friendly
+  countries." A later permit that is **broad on that same axis** (e.g.
+  `P src=any`) is credited, because the hostile majority of that axis was
+  already denied first. This is the negated analogue of the geo case (the deny
+  names the *good* set and negates, instead of naming the *bad* set). Credit is
+  moderate and capped (`BUYBACK_GEOFENCE_PER`≈8, cap 16). Note the value here is
+  *threat* reduction, not address-space reduction — "US + friendly" is still a
+  huge slice of IPv4 — so it is a fixed compensating-control credit, and (per
+  §4.3) it **respects the exposure floor** like every other buyback: a
+  geofenced `any`-source leftover permit therefore keeps its exposure score, and
+  the credit is surfaced in the breakdown without piercing exposure.
 
 `D` must be on the same egress path (srcintf/dstintf overlapping `P`) and
-enabled.
+enabled. (The geofence case keys off the negated axis and the permit being broad
+on it, independent of the destination-cover check the port case needs.)
 
 **Shadow analysis is explicitly OUT OF SCOPE.** We credit that a matching block
 *exists and applies*; we do **not** verify it isn't shadowed by an earlier

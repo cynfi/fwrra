@@ -52,7 +52,8 @@ function parsePanOSSetConfig(text) {
     let r = ruleByName.get(name);
     if (!r) {
       r = { name, from: [], to: [], source: [], destination: [], application: [], service: [],
-            action: 'allow', disabled: false, logEnd: false, logStart: false };
+            action: 'allow', disabled: false, logEnd: false, logStart: false,
+            negateSource: false, negateDest: false };
       ruleByName.set(name, r);
       config.rules.push(r); // preserve first-seen (evaluation) order
     }
@@ -170,7 +171,9 @@ function parsePanOSSetConfig(text) {
         case 'log-end': rule.logEnd = (value === 'yes'); break;
         case 'log-start': rule.logStart = (value === 'yes'); break;
         case 'log-setting': rule.logSetting = value; break;
-        default: break; // description, tag, profiles, negate-*, rule-type — ignored
+        case 'negate-source': rule.negateSource = (value === 'yes'); break;
+        case 'negate-destination': rule.negateDest = (value === 'yes'); break;
+        default: break; // description, tag, profiles, rule-type — ignored
       }
       continue;
     }
@@ -344,6 +347,7 @@ function parsePanOSXmlConfig(text) {
     const rule = {
       name, from: [], to: [], source: [], destination: [], application: [], service: [],
       action: 'allow', disabled: false, logEnd: false, logStart: false,
+      negateSource: false, negateDest: false,
     };
     rule.from = memberValues(childByTag(e, 'from'));
     rule.to = memberValues(childByTag(e, 'to'));
@@ -356,6 +360,8 @@ function parsePanOSXmlConfig(text) {
     const ls = childByTag(e, 'log-start'); if (ls) rule.logStart = ls.textContent.trim() === 'yes';
     const dis = childByTag(e, 'disabled'); if (dis) rule.disabled = dis.textContent.trim() === 'yes';
     const lset = childByTag(e, 'log-setting'); if (lset) rule.logSetting = lset.textContent.trim();
+    const nsrc = childByTag(e, 'negate-source'); if (nsrc) rule.negateSource = nsrc.textContent.trim() === 'yes';
+    const ndst = childByTag(e, 'negate-destination'); if (ndst) rule.negateDest = ndst.textContent.trim() === 'yes';
     config.rules.push(rule); // document order = evaluation order
   }
 

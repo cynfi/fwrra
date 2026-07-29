@@ -206,6 +206,12 @@ function scorePanRule(config, rule, role) {
   const direction = ruleDirection(srcClass, dstClass, role);
   const srcResolved = panResolveEndpointList(config, rule.source);
   const dstResolved = panResolveEndpointList(config, rule.destination);
+  // negate-source/negate-destination invert the endpoint set: the rule matches
+  // everything EXCEPT what's listed. Flagging the resolved node lets the shared
+  // engine score the complement breadth (a geofence allow-list is near-`any`)
+  // and drives the geofence buyback + "not(...)" display.
+  if (rule.negateSource) srcResolved.negated = true;
+  if (rule.negateDest) dstResolved.negated = true;
   const services = panResolveServices(config, rule);
 
   if (action !== 'permit') {
@@ -255,7 +261,10 @@ function panBuildRuleset(config, options) {
     dstResolved: e.scored.dstResolved,
     services: e.scored.services,
     isAnyPort: servicesAreUnrestricted(e.scored.services),
-    isAnyDest: !!(e.scored.dstResolved && e.scored.dstResolved.kind === 'any'),
+    isAnyDest: !!(e.scored.dstResolved && e.scored.dstResolved.kind === 'any' && !e.scored.dstResolved.negated),
+    isAnySource: !!(e.scored.srcResolved && e.scored.srcResolved.kind === 'any' && !e.scored.srcResolved.negated),
+    srcNegated: !!(e.scored.srcResolved && e.scored.srcResolved.negated),
+    dstNegated: !!(e.scored.dstResolved && e.scored.dstResolved.negated),
   }));
   scoredList.forEach((e, i) => {
     if (e.scored.action === 'permit') {

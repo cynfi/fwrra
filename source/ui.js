@@ -205,6 +205,10 @@
 
   function endpointText(resolved) {
     if (!resolved) return '?';
+    return (resolved.negated ? 'NOT ' : '') + endpointTextBase(resolved);
+  }
+
+  function endpointTextBase(resolved) {
     switch (resolved.kind) {
       case 'any': return 'any';
       case 'host': return resolved.address + (resolved.name ? ` (${resolved.name})` : '');
@@ -331,7 +335,7 @@
       <td class="mono rule-number">${row.ruleNumber ?? '\u2014'}</td>
       <td class="risk-cell">
         <div class="risk-bar-wrap">
-          <span class="risk-num" style="color:${band.color}">${s.score}</span>${s.buyback && s.buyback.credit > 0 ? `<span class="buyback-tag" title="Compensating controls in the rulebase reduce this to ${s.inContextScore} in-context (−${s.buyback.credit}). Expand for detail.">→ ${s.inContextScore}</span>` : ''}
+          <span class="risk-num" style="color:${band.color}">${s.score}</span>${s.buyback && s.buyback.credit > 0 && s.inContextScore < s.score ? `<span class="buyback-tag" title="Compensating controls in the rulebase reduce this to ${s.inContextScore} in-context (−${s.buyback.credit}). Expand for detail.">→ ${s.inContextScore}</span>` : ''}
         </div>
         <div class="risk-band-pill" style="background:${band.color}22; color:${band.color}; border:1px solid ${band.color}55;">${band.label}</div>
       </td>
@@ -493,9 +497,16 @@
       if (s.buyback.blockedGeo && s.buyback.blockedGeo.length) {
         parts.push(`${s.buyback.blockedGeo.length} threat-geo block${s.buyback.blockedGeo.length === 1 ? '' : 's'} (\u2212${s.buyback.geoCredit})`);
       }
+      if (s.buyback.blockedGeofence && s.buyback.blockedGeofence.length) {
+        parts.push(`${s.buyback.blockedGeofence.length} geofence allow-list${s.buyback.blockedGeofence.length === 1 ? '' : 's'} (\u2212${s.buyback.geofenceCredit})`);
+      }
       html += `<div class="row"><span class="k">Hardening buyback (compensating controls)</span><span>\u2212${s.buyback.credit}: ${parts.join('; ')}</span></div>`;
       const icBand = s.inContextBand || s.band;
+      const floored = s.inContextScore >= s.score;
       html += `<div class="row total"><span class="k">In-context score</span><span style="color:${icBand.color}">${s.inContextScore} / 100 \u2014 ${icBand.label}</span></div>`;
+      if (floored) {
+        html += `<div class="row" style="font-style:italic; color:var(--text-dim);"><span class="k"></span><span>credit is capped at this rule's exposure floor (${s.exposure.score}) \u2014 source/destination breadth is not bought back, so the score is unchanged</span></div>`;
+      }
       html += `<div class="row" style="font-style:italic; color:var(--text-dim);"><span class="k"></span><span>credit reflects that a matching block exists and precedes this rule; rule-order effectiveness (shadowing) is not verified</span></div>`;
     }
     html += `<div class="row" style="margin-top:6px; padding-top:6px; border-top:1px solid var(--border-soft);"><span class="k">Logging</span><span style="${s.logging.flagged ? 'color:' + (s.logging.severity === 'high' ? 'var(--c-critical)' : 'var(--c-high)') : ''}">${escapeHtml(s.logging.label)}</span></div>`;
@@ -522,6 +533,12 @@
     depth = depth || 0;
     if (depth > 6) return '<ul><li class="tag">max depth</li></ul>';
     if (!resolved) return '<span class="tag">unknown</span>';
+    // Negated endpoint (PAN-OS negate-source/destination): matches everything
+    // EXCEPT the tree below — a geofence allow-list is really its complement.
+    if (resolved.negated && depth === 0) {
+      const inner = renderMemberTree(Object.assign({}, resolved, { negated: false }), depth);
+      return `<span class="flag">⚠ NEGATED — matches everything EXCEPT:</span> ${inner}`;
+    }
     if (resolved.kind === 'any') return '<span class="tag">scope</span> any (0.0.0.0/0)';
     if (resolved.kind === 'host') return `<span class="tag">host</span> ${escapeHtml(resolved.address)}${resolved.name ? ' <span class="tag">' + escapeHtml(resolved.name) + '</span>' : ''}`;
     if (resolved.kind === 'subnet') return `<span class="tag">subnet</span> ${escapeHtml(resolved.address)}/${resolved.prefixLen ?? '?'} (${escapeHtml(resolved.mask || '')})${resolved.name ? ' <span class="tag">' + escapeHtml(resolved.name) + '</span>' : ''}`;
