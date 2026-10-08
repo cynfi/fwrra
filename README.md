@@ -50,6 +50,12 @@ codebase is laid out.
   Collapse all above the list). It has its own CSV
   export (the header Export CSV button follows the active tab).
 
+- The CSV export enumerates address groups down to their individual addresses
+  (comma-separated inside one quoted Source/Destination cell; nested groups are
+  flattened and de-duplicated, subnets as `addr/prefix`), with the group name in
+  trailing `Source Group` / `Destination Group` columns. The on-screen tables
+  keep the compact `NAME [n members]` form.
+
 ## What it doesn't do
 
 - **NAT is out of scope.** This is a rule risk-analysis tool, not a NAT or

@@ -902,13 +902,45 @@
     }
   }
 
+  // ---- CSV-only endpoint formatting ----
+  // The on-screen tables keep the compact "NAME [n members]" text; the CSV
+  // enumerates a group down to its individual addresses, comma-separated (the
+  // cell is quoted by csvEscape, so it stays one field), with the group name in
+  // a separate trailing column.
+  function csvLeaf(r) {
+    switch (r.kind) {
+      case 'host': case 'fqdn': case 'literal': return r.address;
+      case 'subnet': return `${r.address}/${r.prefixLen ?? '?'}`;
+      case 'range': return `${r.start}-${r.end}`;
+      case 'any': return 'any';
+      default: return '?';
+    }
+  }
+
+  function endpointCsv(resolved) {
+    if (!resolved || resolved.kind !== 'group') return endpointText(resolved); // unchanged for non-groups
+    const out = [];
+    const walk = (r, depth) => {
+      if (!r || depth > 20) return;
+      if (r.kind === 'group') r.members.forEach(m => walk(m, depth + 1));
+      else out.push(csvLeaf(r));
+    };
+    walk(resolved, 0);
+    const list = Array.from(new Set(out)).join(',') || '(empty)';
+    return (resolved.negated ? 'NOT ' : '') + list;
+  }
+
+  function endpointGroupName(resolved) {
+    return resolved && resolved.kind === 'group' ? (resolved.name || '') : '';
+  }
+
   // ---- CSV export ----
   exportBtn.addEventListener('click', () => {
     if (activeTab === 'inventory' && INVENTORY) { exportInventoryCsv(); return; }
     const ruleRows = sortRows(ROWS.filter(rowMatchesFilters));
     const header = riskOn
-      ? ['Rule #', 'Score', 'Band', 'Action', 'Inactive', 'Protocol', 'Source', 'Destination', 'Service', 'Interface', 'Direction', 'ACL', 'Implicit', 'Logging', 'Logging Flagged', 'Exposure Label', 'Exposure Score', 'Service Risk Name', 'Service Risk Score']
-      : ['Rule #', 'Action', 'Inactive', 'Protocol', 'Source', 'Destination', 'Service', 'Interface', 'Direction', 'ACL', 'Implicit', 'Logging', 'Logging Flagged'];
+      ? ['Rule #', 'Score', 'Band', 'Action', 'Inactive', 'Protocol', 'Source', 'Destination', 'Service', 'Interface', 'Direction', 'ACL', 'Implicit', 'Logging', 'Logging Flagged', 'Exposure Label', 'Exposure Score', 'Service Risk Name', 'Service Risk Score', 'Source Group', 'Destination Group']
+      : ['Rule #', 'Action', 'Inactive', 'Protocol', 'Source', 'Destination', 'Service', 'Interface', 'Direction', 'ACL', 'Implicit', 'Logging', 'Logging Flagged', 'Source Group', 'Destination Group'];
     const lines = [header.join(',')];
     for (const row of ruleRows) {
       const s = row.scored;
@@ -918,11 +950,12 @@
         s.action,
         row.inactive ? 'yes' : 'no',
         (s.services[0] && s.services[0].protocol) || 'ip',
-        endpointText(s.srcResolved), endpointText(s.dstResolved), serviceText(s.services),
+        endpointCsv(s.srcResolved), endpointCsv(s.dstResolved), serviceText(s.services),
         row.interface || '', row.direction || '', row.aclName || '',
         row.implicit ? 'yes' : 'no',
         s.logging.label, s.logging.flagged ? 'yes' : 'no',
-        ...(riskOn ? [s.exposure.label, s.exposure.score, s.service.name, s.service.score] : [])
+        ...(riskOn ? [s.exposure.label, s.exposure.score, s.service.name, s.service.score] : []),
+        endpointGroupName(s.srcResolved), endpointGroupName(s.dstResolved)
       ].map(csvEscape);
       lines.push(fields.join(','));
     }
@@ -949,13 +982,14 @@
       const preH = policy === undefined ? [] : [label || 'Group'];
       if (s.ruleRows) {
         out.push([...preH, 'ACL', 'Rule #', ...(riskOn ? ['Score', 'Band'] : []), 'Action', 'Inactive', 'Protocol',
-          'Source', 'Destination', 'Service', 'Logging', 'Used by'].join(','));
+          'Source', 'Destination', 'Service', 'Logging', 'Used by', 'Source Group', 'Destination Group'].join(','));
         for (const row of s.ruleRows.filter(r => ruleRowMatchesQuery(r, q))) {
           const sc = row.scored;
           out.push([...pre, row.aclName, row.ruleNumber, ...(riskOn ? [sc.score, sc.band.label] : []), sc.action,
             row.inactive ? 'yes' : 'no', (sc.services[0] && sc.services[0].protocol) || 'ip',
-            endpointText(sc.srcResolved), endpointText(sc.dstResolved), serviceText(sc.services),
-            sc.logging.label, (row.usedBy || []).join('; ')].map(csvEscape).join(','));
+            endpointCsv(sc.srcResolved), endpointCsv(sc.dstResolved), serviceText(sc.services),
+            sc.logging.label, (row.usedBy || []).join('; '),
+            endpointGroupName(sc.srcResolved), endpointGroupName(sc.dstResolved)].map(csvEscape).join(','));
         }
       } else {
         out.push([...preH, ...s.columns.map(c => c.label)].map(csvEscape).join(','));

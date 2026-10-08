@@ -166,7 +166,11 @@ function scoreEntry(config, entry, direction) {
       band: riskBand(0),
       exposure: { score: 0, label: 'deny', direction },
       service: { score: 0, name: 'n/a' },
-      services: [],
+      // Resolved for display/export even though a deny scores 0 (otherwise the
+      // table and CSV show '?' for a deny rule's source/destination/service).
+      services: resolveRuleServices(config, entry),
+      srcResolved: resolveEndpoint(config, entry.src),
+      dstResolved: resolveEndpoint(config, entry.dst),
       direction,
       logging,
     };

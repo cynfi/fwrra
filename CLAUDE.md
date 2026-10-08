@@ -419,6 +419,12 @@ with them unless a vendor's model genuinely doesn't fit:
   implicit permits are `[high]` -> `[low]`. Zone options never list `any`. The ACL
   dropdown lists only names carrying 2+ rules (ASA); FortiOS/PAN-OS names are
   per-rule so it stays hidden there.
+- **CSV endpoint format.** `endpointCsv()` in `ui.js` flattens a `group` endpoint
+  to a comma-separated list of leaf addresses (de-duplicated; `(empty)` for an
+  empty group; negated endpoints prefixed `NOT `), and `Source Group` /
+  `Destination Group` are the last two columns of both the rules and VPN-rule
+  CSVs. Non-group endpoints keep their on-screen text. Every vendor must resolve
+  `srcResolved`/`dstResolved` for deny rules too (ASA's deny shortcut now does).
 - **Risk analysis toggle.** A header switch (`#riskToggle`, on by default) puts
   `body.no-risk` on the page; everything score-dependent carries `.risk-only`
   and is hidden by CSS, with small JS guards for sort/filter/CSV/footer/detail.
