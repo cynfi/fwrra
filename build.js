@@ -38,7 +38,7 @@ const OUT_DIR = path.join(__dirname, 'dist');
 const VENDORS = ['asa', 'fortios', 'panos'];
 
 // Shown in the page title and header; bump on each release.
-const VERSION = '1.0.6';
+const VERSION = '1.0.7';
 
 function read(...parts) {
   return fs.readFileSync(path.join(SRC, ...parts), 'utf8');
