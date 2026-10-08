@@ -76,6 +76,14 @@ source/
                                   # default ordering, rule numbering), and
                                   # detectASAConfig() + registerVendor() at
                                   # the bottom
+      vpn-parser.js              # parseASAVpn(lines): ip local pool, group-policy,
+                                  # tunnel-group, username attributes, standard
+                                  # ACLs, sysopt permit-vpn, global webvpn. Merged
+                                  # into the config by parseASAConfig().
+      vpn-resolve.js             # buildVpnInventory(config): user -> group-policy
+                                  # -> DfltGrpPolicy inheritance, split-tunnel
+                                  # Enabled/Disabled state, scored vpn-filter ACE
+                                  # rows (direction 'internal'), findings
     fortios/
       parser.js                 # parseFortiOSConfig(text) -> {interfaces,
                                  # zones, addresses, addrgrps, services,
@@ -179,6 +187,15 @@ exist:
   scored rule. `ui.js` reads `row.interface`, `row.aclName`,
   `row.ruleNumber`, `row.implicit`, `row.inactive`, and drills into
   `row.scored` for everything risk-related.
+
+Optional fourth entry point: `buildInventory(config, options) -> Inventory | null`
+(documented in `shared/registry.js`). A vendor with extra read-only views (ASA:
+remote-access VPN) returns generic `{title, sections}`; `ui.js` renders it as a
+second tab without knowing the vendor. Scored rows inside an inventory
+(`ruleRows`) reuse the normal rule-row shape, so the risk toggle hides their
+score columns automatically. Return `null` for "nothing to show" (no tab).
+`build.js` loads a vendor's optional `vpn-parser.js` / `vpn-resolve.js` (between
+and after `parser.js` / `resolve.js`) into the same private vendor IIFE.
 
 `row.scored` (the return value of that vendor's `scoreEntry()`) must have
 this shape — this is the actual contract, and it's what `shared/risk.js`
@@ -393,9 +410,31 @@ with them unless a vendor's model genuinely doesn't fit:
   since silent denies hide attack/recon traffic. This severity asymmetry
   should carry over to every vendor's `classifyLogging()`.
 
+- **Risk analysis toggle.** A header switch (`#riskToggle`, on by default) puts
+  `body.no-risk` on the page; everything score-dependent carries `.risk-only`
+  and is hidden by CSS, with small JS guards for sort/filter/CSV/footer/detail.
+  Scores are still computed underneath, so flipping back is instant. Purpose:
+  clean audit screenshots of the rules.
+- **VPN inventory (ASA).** VPN-filter ACEs are scored with direction `'internal'`
+  (client = source, internal = destination) and emitted once per distinct
+  (ACL, ACE) with a `usedBy` list; they never appear in the main rule table.
+  Split tunneling is shown as factual Enabled/Disabled (`tunnelall` = Disabled;
+  `tunnelspecified` = Enabled include; `excludespecified` = Enabled exclude;
+  unset everywhere = Disabled/default) and is never hidden by the risk toggle.
+  RADIUS/LDAP-supplied attributes are not visible in the config; the findings
+  section says so.
+- **Version.** `VERSION` in `build.js` is stamped into every build's `<title>`
+  and header (`{{VERSION}}` in `template.html`). Bump it on each release.
+
 ## Testing
 
-There's no test suite checked into the repo. When changing `source/`
+Tests live in `tests/` (plain Node, no framework). Install the dev-only
+dependency ad hoc — `npm i --no-save jsdom` — then run
+`node build.js && node tests/run.js`. Engine tests load the built artifact's
+engine script into a `vm` context; UI tests drive the built page in jsdom.
+`tests/fixtures/asa-vpn.cfg` is the shared ASA VPN sample.
+
+When changing `source/`
 files, the pattern used during ASA development was headless DOM testing
 with `jsdom` (not committed as a dependency — install ad hoc if needed):
 build the artifact, load it in `jsdom` with `runScripts: 'dangerously'`,

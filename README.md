@@ -32,6 +32,15 @@ codebase is laid out.
   numbered by its position in its own rule list. You can sort by any
   column and jump back to this default order with one click.
 
+- A **Risk analysis** switch (top right) hides every score, band, policy
+  verdict and score-based filter/column — useful for clean audit screenshots of
+  the rules. The CSV export drops its score columns too.
+- For Cisco ASA, a **Remote-access VPN** tab enumerates AnyConnect access:
+  address pools, tunnel-groups, group-policies, per-user overrides, each
+  group's vpn-filter ACL (scored), and whether split tunneling is Enabled or
+  Disabled — with where each value is inherited from. It has its own CSV
+  export (the header Export CSV button follows the active tab).
+
 ## What it doesn't do
 
 - **NAT is out of scope.** This is a rule risk-analysis tool, not a NAT or

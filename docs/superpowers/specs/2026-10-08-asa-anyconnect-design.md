@@ -32,9 +32,10 @@ New fields on the returned config: `pools`, `groupPolicies`, `tunnelGroups`,
   `type` but flagged non-remote-access and excluded from the view.
 - `username NAME attributes` block -> `users[NAME]` with `vpnGroupPolicy`,
   `vpnFilter`, `groupLock`, `framedIp`. Password lines are never stored.
-- `access-list NAME standard permit|deny <net> <mask>|host X|any` parsed into the
-  same `acls` map (entry `{standard:true, action, src}`; no dst/service). Needed
-  for split-tunnel lists. Existing extended parsing untouched.
+- `access-list NAME standard permit|deny <net> <mask>|host X|any` parsed into a
+  separate `standardAcls` map (entry `{action, src, raw}`) so the main rule
+  table is untouched. Needed for split-tunnel lists. Existing extended parsing
+  untouched.
 - Globals into `vpnGlobal`: `sysopt connection permit-vpn`, `webvpn` ->
   `enable <if>`, `anyconnect enable`, `tunnel-group-list enable`.
 
@@ -83,25 +84,28 @@ New `buildVpnInventory(config, options)` (options carries `firewallRole`).
 Optional vendor hook: `buildInventory(config, options) -> Inventory`.
 
 ```
-Inventory = { title, sections: [ { id, heading, columns:[{key,label,risk?}],
-              rows:[ { cells:{key:value}, detail?: html-safe tree spec,
-                       scored?: <same scored shape as rule rows> } ] } ] }
+Inventory = { title, sections: [ Section ] }
+Section   = { id, heading, columns:[{key,label}], rows:[{ cells, detail? }] }
+          | { id, heading, ruleRows: [<rule rows, same shape as buildRuleset>] }
 ```
-`columns[].risk: true` marks score-dependent columns. `ui.js` stays
+`ruleRows` sections carry the scored filter ACEs. `ui.js` stays
 vendor-neutral: if the registered vendor has `buildInventory`, it renders a tab
 ("Remote-access VPN"), reusing the existing member-tree and detail renderers
 and `escapeHtml()`; otherwise no tab. Scored rows reuse the existing
 `riskOn`/`.risk-only` mechanism, so the toggle hides score columns, bands and
-calculation sections in this tab too. The role selector triggers a rebuild of
-the inventory the same way it rebuilds rules. Document the hook in `CLAUDE.md`.
+calculation sections in this tab too. VPN-filter ACEs always use direction
+`'internal'`; the firewall-role selector does not affect the VPN tab. Filter
+ACEs are emitted once per distinct (ACL, ACE) with a *Used by* list of the
+identities that use the ACL. Document the hook in `CLAUDE.md`.
 
 ## 4. UI
 Two tabs under the file-info strip when the hook exists: "Rules" (current view)
 and "Remote-access VPN". VPN tab sections: Tunnel-groups, Group-policies, User
 overrides, Address pools, VPN filter rules, Global findings. Same dark
 monospace table style; click-to-expand rows. Search box filters the active tab.
-A separate **Export VPN CSV** button (one row per identity and per filter ACE;
-score columns omitted when the toggle is off). The existing rule CSV is unchanged.
+VPN CSV: the header Export CSV button exports the VPN tab when it is active, as
+one file with a `# <heading>` block per section (score columns omitted when the
+toggle is off). The rules-tab CSV is unchanged.
 
 ## 5. Testing
 jsdom, as in `CLAUDE.md`, with a sample ASA config covering: two pools; a
