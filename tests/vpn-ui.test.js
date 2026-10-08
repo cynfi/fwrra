@@ -29,8 +29,8 @@ module.exports = async () => {
   const { w, d } = await loadPage('fwrra-asa.html', fixture('asa-vpn.cfg'));
 
   // version shown in page title and header
-  assert.ok(d.title.endsWith(' v1.0.7'), 'title carries version: ' + d.title);
-  assert.strictEqual(d.querySelector('.header h1 .ver').textContent, 'v1.0.7');
+  assert.ok(d.title.endsWith(' v1.0.8'), 'title carries version: ' + d.title);
+  assert.strictEqual(d.querySelector('.header h1 .ver').textContent, 'v1.0.8');
 
   assert.notStrictEqual(d.getElementById('tabBar').style.display, 'none');
   assert.strictEqual(d.getElementById('inventoryTabBtn').textContent, 'Remote-access VPN');
