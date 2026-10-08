@@ -11,6 +11,7 @@
   let INVENTORY = null;
   let activeTab = 'rules';
   let INV_EXPANDED = new Set();
+  let GROUP_OPEN = new Set();
 
   const dropzone = document.getElementById('dropzone');
   const fileInput = document.getElementById('fileInput');
@@ -106,6 +107,7 @@
     ROWS = vendor.buildRuleset(CONFIG, { firewallRole: CURRENT_ROLE });
     INVENTORY = vendor.buildInventory ? vendor.buildInventory(CONFIG, { firewallRole: CURRENT_ROLE }) : null;
     INV_EXPANDED = new Set();
+    GROUP_OPEN = new Set();
     tabBar.style.display = INVENTORY ? '' : 'none';
     document.getElementById('inventoryTabBtn').textContent = INVENTORY ? INVENTORY.title : '';
     EXPANDED = new Set();
@@ -740,6 +742,60 @@
     return wrap;
   }
 
+  // Policy blocks: one collapsible block per group (see shared/registry.js
+  // `groups` sections). Collapsed by default; a search forces matches open.
+  function groupMatches(g, q) {
+    if (!q) return true;
+    if ([g.title].concat(g.summary.map(cellText)).join(' ').toLowerCase().includes(q)) return true;
+    return g.sections.some(s => s.ruleRows
+      ? s.ruleRows.some(r => ruleRowMatchesQuery(r, q))
+      : s.rows.some(r => invRowMatches(r, q)));
+  }
+
+  function buildInvGroups(sec, q) {
+    const wrap = document.createElement('div');
+    const keys = sec.groups.map(g => sec.id + ':' + g.key);
+    const bar = document.createElement('div');
+    bar.className = 'grp-bar';
+    bar.innerHTML = '<button class="exc-btn" data-grp-all="open">+ Expand all</button> ' +
+      '<button class="exc-btn" data-grp-all="close">− Collapse all</button>';
+    bar.querySelector('[data-grp-all="open"]').addEventListener('click', () => { keys.forEach(k => GROUP_OPEN.add(k)); renderInventory(); });
+    bar.querySelector('[data-grp-all="close"]').addEventListener('click', () => { keys.forEach(k => GROUP_OPEN.delete(k)); renderInventory(); });
+    wrap.appendChild(bar);
+    for (const g of sec.groups) {
+      if (!groupMatches(g, q)) continue;
+      const key = sec.id + ':' + g.key;
+      const open = !!q || GROUP_OPEN.has(key);
+      const box = document.createElement('div');
+      box.className = 'grp' + (open ? ' open' : '');
+      const head = document.createElement('div');
+      head.className = 'grp-head';
+      head.innerHTML = `<button class="grp-toggle" aria-expanded="${open}">${open ? '−' : '+'}</button>` +
+        `<span class="grp-title">${escapeHtml(g.title)}</span>` +
+        g.summary.map(c => `<span class="grp-chip">${cellHtml(c)}</span>`).join('');
+      head.addEventListener('click', () => {
+        if (GROUP_OPEN.has(key)) GROUP_OPEN.delete(key); else GROUP_OPEN.add(key);
+        renderInventory();
+      });
+      box.appendChild(head);
+      if (open) {
+        const body = document.createElement('div');
+        body.className = 'grp-body';
+        for (const s of g.sections) {
+          const sub = Object.assign({}, s, { id: key + ':' + s.id }); // unique expand keys per policy
+          const h = document.createElement('h4');
+          h.className = 'grp-sub';
+          h.textContent = s.heading;
+          body.appendChild(h);
+          body.appendChild(s.ruleRows ? buildInvRuleTable(sub, q) : buildInvTable(sub, q));
+        }
+        box.appendChild(body);
+      }
+      wrap.appendChild(box);
+    }
+    return wrap;
+  }
+
   function renderInventory() {
     if (!INVENTORY) { invBody.innerHTML = ''; return; }
     const q = invSearch.value.trim().toLowerCase();
@@ -750,7 +806,7 @@
       const h = document.createElement('h3');
       h.textContent = sec.heading;
       box.appendChild(h);
-      box.appendChild(sec.ruleRows ? buildInvRuleTable(sec, q) : buildInvTable(sec, q));
+      box.appendChild(sec.groups ? buildInvGroups(sec, q) : sec.ruleRows ? buildInvRuleTable(sec, q) : buildInvTable(sec, q));
       invBody.appendChild(box);
     }
   }
@@ -795,29 +851,41 @@
   function exportInventoryCsv() {
     const q = invSearch.value.trim().toLowerCase();
     const out = [];
-    for (const sec of INVENTORY.sections) {
-      out.push(csvEscape('# ' + sec.heading));
-      if (sec.ruleRows) {
-        out.push(['ACL', 'Rule #', ...(riskOn ? ['Score', 'Band'] : []), 'Action', 'Inactive', 'Protocol',
+    // Emit one section as a CSV block; `policy` (optional) becomes a first column.
+    const emit = (heading, s, policy) => {
+      out.push(csvEscape('# ' + heading));
+      const pre = policy === undefined ? [] : [policy];
+      const preH = policy === undefined ? [] : ['Policy'];
+      if (s.ruleRows) {
+        out.push([...preH, 'ACL', 'Rule #', ...(riskOn ? ['Score', 'Band'] : []), 'Action', 'Inactive', 'Protocol',
           'Source', 'Destination', 'Service', 'Logging', 'Used by'].join(','));
-        for (const row of sec.ruleRows.filter(r => ruleRowMatchesQuery(r, q))) {
-          const s = row.scored;
-          out.push([row.aclName, row.ruleNumber, ...(riskOn ? [s.score, s.band.label] : []), s.action,
-            row.inactive ? 'yes' : 'no', (s.services[0] && s.services[0].protocol) || 'ip',
-            endpointText(s.srcResolved), endpointText(s.dstResolved), serviceText(s.services),
-            s.logging.label, (row.usedBy || []).join('; ')].map(csvEscape).join(','));
+        for (const row of s.ruleRows.filter(r => ruleRowMatchesQuery(r, q))) {
+          const sc = row.scored;
+          out.push([...pre, row.aclName, row.ruleNumber, ...(riskOn ? [sc.score, sc.band.label] : []), sc.action,
+            row.inactive ? 'yes' : 'no', (sc.services[0] && sc.services[0].protocol) || 'ip',
+            endpointText(sc.srcResolved), endpointText(sc.dstResolved), serviceText(sc.services),
+            sc.logging.label, (row.usedBy || []).join('; ')].map(csvEscape).join(','));
         }
       } else {
-        out.push(sec.columns.map(c => csvEscape(c.label)).join(','));
-        for (const row of sec.rows.filter(r => invRowMatches(r, q))) {
-          out.push(sec.columns.map(c => {
+        out.push([...preH, ...s.columns.map(c => c.label)].map(csvEscape).join(','));
+        for (const row of s.rows.filter(r => invRowMatches(r, q))) {
+          out.push([...pre, ...s.columns.map(c => {
             const v = row.cells[c.key];
             const n = v && typeof v === 'object' && v.note ? ` (${v.note})` : '';
-            return csvEscape(cellText(v) + n);
-          }).join(','));
+            return cellText(v) + n;
+          })].map(csvEscape).join(','));
         }
       }
       out.push('');
+    };
+    for (const sec of INVENTORY.sections) {
+      if (sec.groups) {
+        for (const g of sec.groups.filter(x => groupMatches(x, q))) {
+          for (const s of g.sections) emit(`${g.title} / ${s.heading}`, s, g.title);
+        }
+      } else {
+        emit(sec.heading, sec);
+      }
     }
     downloadCsv(out.join('\n'), 'asa-vpn-inventory.csv');
   }

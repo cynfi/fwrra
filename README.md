@@ -38,7 +38,9 @@ codebase is laid out.
 - For Cisco ASA, a **Remote-access VPN** tab enumerates AnyConnect access:
   address pools, tunnel-groups, group-policies, per-user overrides, each
   group's vpn-filter ACL (scored), and whether split tunneling is Enabled or
-  Disabled — with where each value is inherited from. It has its own CSV
+  Disabled — with where each value is inherited from. It is grouped by
+  group-policy: one collapsible block per policy (`+` / `-`, plus Expand all /
+  Collapse all) so each policy can be evaluated on its own. It has its own CSV
   export (the header Export CSV button follows the active tab).
 
 ## What it doesn't do

@@ -415,6 +415,13 @@ with them unless a vendor's model genuinely doesn't fit:
   and is hidden by CSS, with small JS guards for sort/filter/CSV/footer/detail.
   Scores are still computed underneath, so flipping back is instant. Purpose:
   clean audit screenshots of the rules.
+- **VPN inventory (ASA) is grouped by group-policy.** One collapsible block per
+  policy (`DfltGrpPolicy` first, then a `Global / unassigned` block for unused
+  pools, users with no resolvable policy and global findings). Tunnel-groups land
+  under their `default-group-policy`; users under their `vpn-group-policy`, else
+  the group-lock'ed tunnel-group's policy. Blocks are collapsed by default, with
+  `+`/`-` per block and Expand all / Collapse all. Vendor-neutral contract: a
+  `groups` section type (see `shared/registry.js`).
 - **VPN inventory (ASA).** VPN-filter ACEs are scored with direction `'internal'`
   (client = source, internal = destination) and emitted once per distinct
   (ACL, ACE) with a `usedBy` list; they never appear in the main rule table.

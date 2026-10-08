@@ -278,6 +278,24 @@
     color: var(--text-dim); margin: 0 0 8px;
   }
   .inv-section .tag { color: var(--text-dim); font-size: 10.5px; margin-left: 6px; }
+  .grp-bar { display: flex; gap: 8px; margin-bottom: 10px; }
+  .grp { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); margin-bottom: 8px; overflow: hidden; }
+  .grp-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 9px 12px; cursor: pointer; }
+  .grp-head:hover { background: #1c2130; }
+  .grp.open > .grp-head { border-bottom: 1px solid var(--border-soft); background: #1a1f2c; }
+  .grp-toggle {
+    font-family: var(--mono); font-size: 14px; font-weight: 700; line-height: 1; width: 22px; height: 22px;
+    cursor: pointer; background: var(--panel-2); color: var(--text-bright);
+    border: 1px solid var(--border); border-radius: 4px; padding: 0;
+  }
+  .grp-title { font-family: var(--mono); font-size: 13px; font-weight: 700; color: var(--text-bright); }
+  .grp-chip { font-family: var(--mono); font-size: 11.5px; color: var(--text-dim); }
+  .grp-body { padding: 12px 14px 4px; }
+  .grp-sub {
+    font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--text-dim); margin: 4px 0 6px;
+  }
+  .grp-body .table-wrap { margin-bottom: 14px; }
   .tone-warn { color: var(--c-high); }
   .tone-dim { color: var(--text-dim); }
 

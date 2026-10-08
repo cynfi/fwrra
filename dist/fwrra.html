@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Firewall Rule Risk Analyzer v1.0.5</title>
+<title>Firewall Rule Risk Analyzer v1.0.6</title>
 <style>
   @font-face { font-family: 'sys-mono'; src: local('JetBrains Mono'), local('SF Mono'), local('Consolas'); }
   :root {
@@ -278,6 +278,24 @@
     color: var(--text-dim); margin: 0 0 8px;
   }
   .inv-section .tag { color: var(--text-dim); font-size: 10.5px; margin-left: 6px; }
+  .grp-bar { display: flex; gap: 8px; margin-bottom: 10px; }
+  .grp { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); margin-bottom: 8px; overflow: hidden; }
+  .grp-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 9px 12px; cursor: pointer; }
+  .grp-head:hover { background: #1c2130; }
+  .grp.open > .grp-head { border-bottom: 1px solid var(--border-soft); background: #1a1f2c; }
+  .grp-toggle {
+    font-family: var(--mono); font-size: 14px; font-weight: 700; line-height: 1; width: 22px; height: 22px;
+    cursor: pointer; background: var(--panel-2); color: var(--text-bright);
+    border: 1px solid var(--border); border-radius: 4px; padding: 0;
+  }
+  .grp-title { font-family: var(--mono); font-size: 13px; font-weight: 700; color: var(--text-bright); }
+  .grp-chip { font-family: var(--mono); font-size: 11.5px; color: var(--text-dim); }
+  .grp-body { padding: 12px 14px 4px; }
+  .grp-sub {
+    font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--text-dim); margin: 4px 0 6px;
+  }
+  .grp-body .table-wrap { margin-bottom: 14px; }
   .tone-warn { color: var(--c-high); }
   .tone-dim { color: var(--text-dim); }
 
@@ -296,7 +314,7 @@
 <div class="app">
   <div class="header">
     <div>
-      <h1><span class="dot"></span>Firewall Rule Risk Analyzer <span class="ver">v1.0.5</span></h1>
+      <h1><span class="dot"></span>Firewall Rule Risk Analyzer <span class="ver">v1.0.6</span></h1>
       <div class="sub">rule exposure &amp; policy scoring &middot; runs entirely in your browser, nothing uploaded</div>
     </div>
     <div class="header-actions" id="headerActions" style="display:none;">
@@ -454,6 +472,8 @@ const SYSLOG_LEVEL_NAMES = {
 //         Inventory = { title, sections: Section[] }
 //         Section   = { id, heading, columns:[{key,label}], rows:[{cells, detail?}] }
 //                   | { id, heading, ruleRows: RuleRow[] }   (scored rule rows)
+//                   | { id, heading, groups: [{ key, title, summary: cell[], sections: Section[] }] }
+//                       (collapsible blocks, collapsed by default, +/- per block and expand/collapse all)
 //         cell = string | { text, tone?: 'warn'|'dim', note? }
 //         detail block = {kind:'kv'|'networks'|'list', title, ...}
 //         Return null when the config has nothing to show (no tab).
@@ -2307,18 +2327,6 @@ function vpnTunnelGroupRow(info) {
   };
 }
 
-function vpnGroupPolicyRow(info) {
-  const gp = info.owner;
-  return {
-    cells: Object.assign({
-      name: gp.name,
-      protocols: vpnCell(vpnJoin(info.protocols), null, vpnNote(info.protocols, 'group-policy')),
-      logins: vpnCell(vpnJoin(info.logins), null, vpnNote(info.logins, 'group-policy')),
-    }, vpnCommonCells(info)),
-    detail: vpnDetailBlocks(info, [['Type', gp.kind || '—']]),
-  };
-}
-
 function vpnUserRow(info) {
   const u = info.owner;
   return {
@@ -2335,17 +2343,17 @@ function vpnUserRow(info) {
   };
 }
 
-function vpnFindings(config, tgInfos, userInfos) {
+function vpnFindings(config, infos, withGlobal) {
   const out = [];
   const add = (level, subject, finding) => out.push({
     cells: { level: vpnCell(level, level === 'warn' ? 'warn' : 'dim'), subject, finding },
   });
   const g = config.vpnGlobal;
-  add('info', 'Global', g.permitVpn
+  if (withGlobal) add('info', 'Global', g.permitVpn
     ? `sysopt connection permit-vpn${g.permitVpnExplicit ? '' : ' (ASA default)'}: decrypted VPN traffic bypasses interface ACLs; only each identity's vpn-filter restricts it.`
     : 'sysopt connection permit-vpn is disabled: VPN traffic is also checked against interface ACLs.');
-  add('info', 'Global', 'Attributes supplied by RADIUS/LDAP (pools, filters, group-policy) are not visible in the config and are not reflected here.');
-  for (const info of tgInfos.concat(userInfos)) {
+  if (withGlobal) add('info', 'Global', 'Attributes supplied by RADIUS/LDAP (pools, filters, group-policy) are not visible in the config and are not reflected here.');
+  for (const info of infos) {
     const subj = `${info.kind} ${info.name}`;
     const o = info.owner;
     if (info.kind === 'tunnel-group' && o.defaultGroupPolicy && !config.groupPolicies[o.defaultGroupPolicy]) {
@@ -2372,7 +2380,7 @@ function vpnFindings(config, tgInfos, userInfos) {
 
 // One scored rule row per distinct (vpn-filter ACL, ACE), with the identities
 // that use it. Direction is 'internal' (client -> internal, symmetric blend).
-function vpnFilterRuleRows(config, infos) {
+function vpnFilterRuleRows(config, infos, idRef) {
   const usedBy = new Map(); // aclName -> ["tunnel-group ENG", ...]
   for (const info of infos) {
     if (!info.filter.aclName) continue;
@@ -2380,7 +2388,6 @@ function vpnFilterRuleRows(config, infos) {
     usedBy.get(info.filter.aclName).push(`${info.kind} ${info.name}`);
   }
   const rows = [];
-  let id = VPN_ROW_ID_BASE;
   for (const [aclName, users] of usedBy) {
     const acl = config.acls[aclName];
     if (!acl) continue;
@@ -2395,13 +2402,83 @@ function vpnFilterRuleRows(config, infos) {
         scored.services = resolveRuleServices(config, entry);
       }
       rows.push({
-        id: id++, type: 'rule', aclName, ruleNumber: seq, entry, scored,
+        id: idRef.next++, type: 'rule', aclName, ruleNumber: seq, entry, scored,
         interface: 'vpn-filter', direction: 'vpn-filter', implicit: false,
         inactive: !!entry.inactive, usedBy: users,
       });
     }
   }
   return rows;
+}
+
+const VPN_TG_COLUMNS = [
+  { key: 'name', label: 'Tunnel-group' }, { key: 'alias', label: 'Alias / URL' },
+  { key: 'pools', label: 'Address pool(s)' }, { key: 'filter', label: 'VPN filter' },
+  { key: 'split', label: 'Split tunneling' }, { key: 'auth', label: 'Auth server' },
+];
+const VPN_USER_COLUMNS = [
+  { key: 'name', label: 'User' }, { key: 'groupLock', label: 'Group-lock' },
+  { key: 'pools', label: 'Address' }, { key: 'filter', label: 'VPN filter' },
+  { key: 'split', label: 'Split tunneling' },
+];
+const VPN_FINDING_COLUMNS = [
+  { key: 'level', label: 'Level' }, { key: 'subject', label: 'Subject' }, { key: 'finding', label: 'Finding' },
+];
+
+// "Effective settings" table for one policy (rows of Setting | Value).
+function vpnSettingsRows(gpInfo, defined) {
+  const rows = vpnCommonDetail(gpInfo).map(([k, v]) => ({ cells: { name: k, value: v } }));
+  if (gpInfo.split.networks.length) {
+    rows[2].detail = [{
+      kind: 'networks',
+      title: `Split-tunnel networks (${gpInfo.split.aclName}, ${gpInfo.split.mode === 'include' ? 'tunneled' : 'excluded from tunnel'})`,
+      entries: gpInfo.split.networks,
+    }];
+  }
+  if (!defined) rows.unshift({ cells: { name: 'Defined in config', value: vpnCell('no', 'warn') } });
+  const raw = gpInfo.owner.rawAttrs || [];
+  if (raw.length) rows.push({ cells: { name: 'Unmodelled attributes', value: raw.join('; ') } });
+  return rows;
+}
+
+function vpnPlural(n, word) { return `${n} ${word}${n === 1 ? '' : 's'}`; }
+
+// One collapsible block per group-policy: its settings, the tunnel-groups and
+// user overrides that land in it, their vpn-filter rules (scored) and findings.
+function vpnBuildGroup(config, g, gpInfo, idents, idRef) {
+  const findings = vpnFindings(config, g.tgInfos.concat(g.userInfos), false);
+  const warnCount = findings.filter(r => r.cells.level.text === 'warn').length;
+  const sections = [{
+    id: 'settings', heading: 'Effective settings',
+    columns: [{ key: 'name', label: 'Setting' }, { key: 'value', label: 'Value' }],
+    rows: vpnSettingsRows(gpInfo, g.defined),
+  }];
+  if (g.tgInfos.length) sections.push({
+    id: 'tunnel-groups', heading: 'Tunnel-groups using this policy',
+    columns: VPN_TG_COLUMNS, rows: g.tgInfos.map(vpnTunnelGroupRow),
+  });
+  if (g.userInfos.length) sections.push({
+    id: 'users', heading: 'User overrides', columns: VPN_USER_COLUMNS, rows: g.userInfos.map(vpnUserRow),
+  });
+  const ruleRows = vpnFilterRuleRows(config, idents, idRef);
+  if (ruleRows.length) sections.push({ id: 'filter-rules', heading: 'VPN filter rules', ruleRows });
+  if (findings.length) sections.push({ id: 'findings', heading: 'Findings', columns: VPN_FINDING_COLUMNS, rows: findings });
+
+  let poolNames = gpInfo.pools.map(p => p.name);
+  if (!poolNames.length) {
+    poolNames = [];
+    for (const ti of g.tgInfos) for (const p of ti.pools) if (!poolNames.includes(p.name)) poolNames.push(p.name);
+  }
+  const summary = [
+    vpnCell('split: ' + gpInfo.split.text, gpInfo.split.problem ? 'warn' : null),
+    vpnCell('filter: ' + vpnFilterText(gpInfo), gpInfo.filter.aclName ? null : 'warn'),
+    vpnCell('pools: ' + (poolNames.join(', ') || '—')),
+    vpnCell(`${vpnPlural(g.tgInfos.length, 'tunnel-group')} · ${vpnPlural(g.userInfos.length, 'user')}`, 'dim'),
+  ];
+  if (warnCount) summary.push(vpnCell(vpnPlural(warnCount, 'warning'), 'warn'));
+  const title = g.defined ? g.name
+    : (g.name === VPN_DFLT ? `${g.name} (built-in defaults)` : `${g.name} (not defined)`);
+  return { key: 'gp:' + g.name, title, summary, sections };
 }
 
 function buildVpnInventory(config, options) {
@@ -2411,72 +2488,70 @@ function buildVpnInventory(config, options) {
   const userList = Object.keys(config.users).map(k => config.users[k])
     .filter(u => u.vpnGroupPolicy || u.vpnFilter || u.groupLock || u.framedIp);
 
-  const gpNames = new Set();
-  for (const tg of tgs) if (tg.defaultGroupPolicy && config.groupPolicies[tg.defaultGroupPolicy]) gpNames.add(tg.defaultGroupPolicy);
-  for (const u of userList) if (u.vpnGroupPolicy && config.groupPolicies[u.vpnGroupPolicy]) gpNames.add(u.vpnGroupPolicy);
-  if (config.groupPolicies[VPN_DFLT]) gpNames.add(VPN_DFLT);
+  // Bucket identities by the group-policy they land in.
+  const buckets = new Map();
+  const slot = (name) => {
+    if (!buckets.has(name)) {
+      buckets.set(name, {
+        name, defined: !!config.groupPolicies[name],
+        owner: config.groupPolicies[name] || { name, rawAttrs: [] },
+        tgInfos: [], userInfos: [],
+      });
+    }
+    return buckets.get(name);
+  };
+  if (config.groupPolicies[VPN_DFLT]) slot(VPN_DFLT);
+  for (const tg of tgs) slot(tg.defaultGroupPolicy || VPN_DFLT).tgInfos.push(vpnIdentityInfo(config, 'tunnel-group', tg));
+  const unassignedUsers = [];
+  for (const u of userList) {
+    const locked = u.groupLock && config.tunnelGroups[u.groupLock];
+    const name = u.vpnGroupPolicy || (locked && locked.defaultGroupPolicy) || null;
+    const info = vpnIdentityInfo(config, 'user', u);
+    if (name) slot(name).userInfos.push(info); else unassignedUsers.push(info);
+  }
+  const ordered = Array.from(buckets.values())
+    .sort((a, b) => (a.name === VPN_DFLT ? -1 : b.name === VPN_DFLT ? 1 : 0));
 
-  const tgInfos = tgs.map(tg => vpnIdentityInfo(config, 'tunnel-group', tg));
-  const gpInfos = Object.keys(config.groupPolicies).filter(n => gpNames.has(n))
-    .sort((a, b) => (a === VPN_DFLT ? -1 : b === VPN_DFLT ? 1 : 0))
-    .map(n => vpnIdentityInfo(config, 'group-policy', config.groupPolicies[n]));
-  const userInfos = userList.map(u => vpnIdentityInfo(config, 'user', u));
-  const all = tgInfos.concat(gpInfos, userInfos);
+  const idRef = { next: VPN_ROW_ID_BASE };
+  const usedPools = new Set();
+  const groups = [];
+  for (const g of ordered) {
+    const gpInfo = vpnIdentityInfo(config, 'group-policy', g.owner);
+    const idents = g.tgInfos.concat([gpInfo], g.userInfos);
+    for (const i of idents) {
+      i.poolSel.names.forEach(n => usedPools.add(n));
+    }
+    groups.push(vpnBuildGroup(config, g, gpInfo, idents, idRef));
+  }
+  for (const i of unassignedUsers) i.poolSel.names.forEach(n => usedPools.add(n));
 
-  const sections = [];
-  if (tgInfos.length) sections.push({
-    id: 'tunnel-groups', heading: 'Tunnel-groups',
-    columns: [
-      { key: 'name', label: 'Tunnel-group' }, { key: 'alias', label: 'Alias / URL' },
-      { key: 'pools', label: 'Address pool(s)' }, { key: 'groupPolicy', label: 'Group-policy' },
-      { key: 'filter', label: 'VPN filter' }, { key: 'split', label: 'Split tunneling' },
-      { key: 'auth', label: 'Auth server' },
-    ],
-    rows: tgInfos.map(vpnTunnelGroupRow),
-  });
-  if (gpInfos.length) sections.push({
-    id: 'group-policies', heading: 'Group-policies',
-    columns: [
-      { key: 'name', label: 'Group-policy' }, { key: 'pools', label: 'Address pool(s)' },
-      { key: 'filter', label: 'VPN filter' }, { key: 'split', label: 'Split tunneling' },
-      { key: 'protocols', label: 'Tunnel protocols' }, { key: 'logins', label: 'Simult. logins' },
-    ],
-    rows: gpInfos.map(vpnGroupPolicyRow),
-  });
-  if (userInfos.length) sections.push({
-    id: 'users', heading: 'User overrides',
-    columns: [
-      { key: 'name', label: 'User' }, { key: 'groupPolicy', label: 'Group-policy' },
-      { key: 'groupLock', label: 'Group-lock' }, { key: 'pools', label: 'Address' },
-      { key: 'filter', label: 'VPN filter' }, { key: 'split', label: 'Split tunneling' },
-    ],
-    rows: userInfos.map(vpnUserRow),
-  });
-
-  const poolNames = Object.keys(config.pools);
-  if (poolNames.length) sections.push({
-    id: 'pools', heading: 'Address pools',
-    columns: [
-      { key: 'name', label: 'Pool' }, { key: 'range', label: 'Range' }, { key: 'mask', label: 'Mask' },
-      { key: 'count', label: 'Addresses' }, { key: 'usedBy', label: 'Used by' },
-    ],
-    rows: poolNames.map(n => {
+  // Global / unassigned: unused pools, users with no resolvable policy, global findings.
+  const gsections = [];
+  const unusedPools = Object.keys(config.pools).filter(n => !usedPools.has(n));
+  if (unusedPools.length) gsections.push({
+    id: 'pools', heading: 'Address pools not referenced by any policy',
+    columns: [{ key: 'name', label: 'Pool' }, { key: 'range', label: 'Range' }, { key: 'mask', label: 'Mask' }, { key: 'count', label: 'Addresses' }],
+    rows: unusedPools.map(n => {
       const p = config.pools[n];
-      const users = all.filter(i => i.poolSel.names.includes(n)).map(i => `${i.kind} ${i.name}`);
-      return { cells: { name: n, range: `${p.start}–${p.end}`, mask: p.mask || '—', count: String(p.count), usedBy: users.join(', ') || '—' } };
+      return { cells: { name: n, range: `${p.start}–${p.end}`, mask: p.mask || '—', count: String(p.count) } };
     }),
   });
-
-  const filterRows = vpnFilterRuleRows(config, all);
-  if (filterRows.length) sections.push({ id: 'filter-rules', heading: 'VPN filter rules', ruleRows: filterRows });
-
-  sections.push({
-    id: 'findings', heading: 'Findings',
-    columns: [{ key: 'level', label: 'Level' }, { key: 'subject', label: 'Subject' }, { key: 'finding', label: 'Finding' }],
-    rows: vpnFindings(config, tgInfos, userInfos),
+  if (unassignedUsers.length) {
+    gsections.push({ id: 'users', heading: 'User overrides with no resolvable policy', columns: VPN_USER_COLUMNS, rows: unassignedUsers.map(vpnUserRow) });
+    const ur = vpnFilterRuleRows(config, unassignedUsers, idRef);
+    if (ur.length) gsections.push({ id: 'filter-rules', heading: 'VPN filter rules', ruleRows: ur });
+  }
+  const gfind = vpnFindings(config, unassignedUsers, true);
+  gsections.push({ id: 'findings', heading: 'Findings', columns: VPN_FINDING_COLUMNS, rows: gfind });
+  const gwarn = gfind.filter(r => r.cells.level.text === 'warn').length;
+  groups.push({
+    key: 'unassigned', title: 'Global / unassigned',
+    summary: [vpnCell('global findings and items not tied to a policy', 'dim')]
+      .concat(gwarn ? [vpnCell(vpnPlural(gwarn, 'warning'), 'warn')] : []),
+    sections: gsections,
   });
 
-  return { title: 'Remote-access VPN', sections };
+  return { title: 'Remote-access VPN', sections: [{ id: 'policies', heading: 'VPN policies', groups }] };
 }
 
 })();
@@ -3964,6 +4039,7 @@ registerVendor({
   let INVENTORY = null;
   let activeTab = 'rules';
   let INV_EXPANDED = new Set();
+  let GROUP_OPEN = new Set();
 
   const dropzone = document.getElementById('dropzone');
   const fileInput = document.getElementById('fileInput');
@@ -4059,6 +4135,7 @@ registerVendor({
     ROWS = vendor.buildRuleset(CONFIG, { firewallRole: CURRENT_ROLE });
     INVENTORY = vendor.buildInventory ? vendor.buildInventory(CONFIG, { firewallRole: CURRENT_ROLE }) : null;
     INV_EXPANDED = new Set();
+    GROUP_OPEN = new Set();
     tabBar.style.display = INVENTORY ? '' : 'none';
     document.getElementById('inventoryTabBtn').textContent = INVENTORY ? INVENTORY.title : '';
     EXPANDED = new Set();
@@ -4693,6 +4770,60 @@ registerVendor({
     return wrap;
   }
 
+  // Policy blocks: one collapsible block per group (see shared/registry.js
+  // `groups` sections). Collapsed by default; a search forces matches open.
+  function groupMatches(g, q) {
+    if (!q) return true;
+    if ([g.title].concat(g.summary.map(cellText)).join(' ').toLowerCase().includes(q)) return true;
+    return g.sections.some(s => s.ruleRows
+      ? s.ruleRows.some(r => ruleRowMatchesQuery(r, q))
+      : s.rows.some(r => invRowMatches(r, q)));
+  }
+
+  function buildInvGroups(sec, q) {
+    const wrap = document.createElement('div');
+    const keys = sec.groups.map(g => sec.id + ':' + g.key);
+    const bar = document.createElement('div');
+    bar.className = 'grp-bar';
+    bar.innerHTML = '<button class="exc-btn" data-grp-all="open">+ Expand all</button> ' +
+      '<button class="exc-btn" data-grp-all="close">− Collapse all</button>';
+    bar.querySelector('[data-grp-all="open"]').addEventListener('click', () => { keys.forEach(k => GROUP_OPEN.add(k)); renderInventory(); });
+    bar.querySelector('[data-grp-all="close"]').addEventListener('click', () => { keys.forEach(k => GROUP_OPEN.delete(k)); renderInventory(); });
+    wrap.appendChild(bar);
+    for (const g of sec.groups) {
+      if (!groupMatches(g, q)) continue;
+      const key = sec.id + ':' + g.key;
+      const open = !!q || GROUP_OPEN.has(key);
+      const box = document.createElement('div');
+      box.className = 'grp' + (open ? ' open' : '');
+      const head = document.createElement('div');
+      head.className = 'grp-head';
+      head.innerHTML = `<button class="grp-toggle" aria-expanded="${open}">${open ? '−' : '+'}</button>` +
+        `<span class="grp-title">${escapeHtml(g.title)}</span>` +
+        g.summary.map(c => `<span class="grp-chip">${cellHtml(c)}</span>`).join('');
+      head.addEventListener('click', () => {
+        if (GROUP_OPEN.has(key)) GROUP_OPEN.delete(key); else GROUP_OPEN.add(key);
+        renderInventory();
+      });
+      box.appendChild(head);
+      if (open) {
+        const body = document.createElement('div');
+        body.className = 'grp-body';
+        for (const s of g.sections) {
+          const sub = Object.assign({}, s, { id: key + ':' + s.id }); // unique expand keys per policy
+          const h = document.createElement('h4');
+          h.className = 'grp-sub';
+          h.textContent = s.heading;
+          body.appendChild(h);
+          body.appendChild(s.ruleRows ? buildInvRuleTable(sub, q) : buildInvTable(sub, q));
+        }
+        box.appendChild(body);
+      }
+      wrap.appendChild(box);
+    }
+    return wrap;
+  }
+
   function renderInventory() {
     if (!INVENTORY) { invBody.innerHTML = ''; return; }
     const q = invSearch.value.trim().toLowerCase();
@@ -4703,7 +4834,7 @@ registerVendor({
       const h = document.createElement('h3');
       h.textContent = sec.heading;
       box.appendChild(h);
-      box.appendChild(sec.ruleRows ? buildInvRuleTable(sec, q) : buildInvTable(sec, q));
+      box.appendChild(sec.groups ? buildInvGroups(sec, q) : sec.ruleRows ? buildInvRuleTable(sec, q) : buildInvTable(sec, q));
       invBody.appendChild(box);
     }
   }
@@ -4748,29 +4879,41 @@ registerVendor({
   function exportInventoryCsv() {
     const q = invSearch.value.trim().toLowerCase();
     const out = [];
-    for (const sec of INVENTORY.sections) {
-      out.push(csvEscape('# ' + sec.heading));
-      if (sec.ruleRows) {
-        out.push(['ACL', 'Rule #', ...(riskOn ? ['Score', 'Band'] : []), 'Action', 'Inactive', 'Protocol',
+    // Emit one section as a CSV block; `policy` (optional) becomes a first column.
+    const emit = (heading, s, policy) => {
+      out.push(csvEscape('# ' + heading));
+      const pre = policy === undefined ? [] : [policy];
+      const preH = policy === undefined ? [] : ['Policy'];
+      if (s.ruleRows) {
+        out.push([...preH, 'ACL', 'Rule #', ...(riskOn ? ['Score', 'Band'] : []), 'Action', 'Inactive', 'Protocol',
           'Source', 'Destination', 'Service', 'Logging', 'Used by'].join(','));
-        for (const row of sec.ruleRows.filter(r => ruleRowMatchesQuery(r, q))) {
-          const s = row.scored;
-          out.push([row.aclName, row.ruleNumber, ...(riskOn ? [s.score, s.band.label] : []), s.action,
-            row.inactive ? 'yes' : 'no', (s.services[0] && s.services[0].protocol) || 'ip',
-            endpointText(s.srcResolved), endpointText(s.dstResolved), serviceText(s.services),
-            s.logging.label, (row.usedBy || []).join('; ')].map(csvEscape).join(','));
+        for (const row of s.ruleRows.filter(r => ruleRowMatchesQuery(r, q))) {
+          const sc = row.scored;
+          out.push([...pre, row.aclName, row.ruleNumber, ...(riskOn ? [sc.score, sc.band.label] : []), sc.action,
+            row.inactive ? 'yes' : 'no', (sc.services[0] && sc.services[0].protocol) || 'ip',
+            endpointText(sc.srcResolved), endpointText(sc.dstResolved), serviceText(sc.services),
+            sc.logging.label, (row.usedBy || []).join('; ')].map(csvEscape).join(','));
         }
       } else {
-        out.push(sec.columns.map(c => csvEscape(c.label)).join(','));
-        for (const row of sec.rows.filter(r => invRowMatches(r, q))) {
-          out.push(sec.columns.map(c => {
+        out.push([...preH, ...s.columns.map(c => c.label)].map(csvEscape).join(','));
+        for (const row of s.rows.filter(r => invRowMatches(r, q))) {
+          out.push([...pre, ...s.columns.map(c => {
             const v = row.cells[c.key];
             const n = v && typeof v === 'object' && v.note ? ` (${v.note})` : '';
-            return csvEscape(cellText(v) + n);
-          }).join(','));
+            return cellText(v) + n;
+          })].map(csvEscape).join(','));
         }
       }
       out.push('');
+    };
+    for (const sec of INVENTORY.sections) {
+      if (sec.groups) {
+        for (const g of sec.groups.filter(x => groupMatches(x, q))) {
+          for (const s of g.sections) emit(`${g.title} / ${s.heading}`, s, g.title);
+        }
+      } else {
+        emit(sec.heading, sec);
+      }
     }
     downloadCsv(out.join('\n'), 'asa-vpn-inventory.csv');
   }
