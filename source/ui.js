@@ -7,6 +7,7 @@
   let sortKey = 'default';
   let sortDir = 'asc';
   let showInactive = false;
+  let riskOn = true;
 
   const dropzone = document.getElementById('dropzone');
   const fileInput = document.getElementById('fileInput');
@@ -25,6 +26,7 @@
   const showInactiveToggle = document.getElementById('showInactiveToggle');
   const roleSelect = document.getElementById('roleSelect');
   const filterPolicy = document.getElementById('filterPolicy');
+  const riskToggle = document.getElementById('riskToggle');
   const searchBox = document.getElementById('searchBox');
   const footerNote = document.getElementById('footerNote');
   const fileInfoName = document.getElementById('fileInfoName');
@@ -127,12 +129,12 @@
     }
     summaryEl.innerHTML = `
       <div class="cell"><div class="n">${ruleRows.length}</div><div class="l">Total rules</div></div>
-      <div class="cell crit"><div class="n">${bands.Critical}</div><div class="l">Critical</div></div>
-      <div class="cell high"><div class="n">${bands.High}</div><div class="l">High</div></div>
-      <div class="cell med"><div class="n">${bands.Medium}</div><div class="l">Medium</div></div>
-      <div class="cell low"><div class="n">${bands.Low}</div><div class="l">Low</div></div>
-      <div class="cell"><div class="n" style="color:${againstOpen ? 'var(--c-critical)' : 'var(--text-bright)'}">${againstOpen}</div><div class="l">Against policy</div></div>
-      <div class="cell"><div class="n" style="color:${exceptions ? 'var(--c-high)' : 'var(--text-bright)'}">${exceptions}</div><div class="l">Exceptions</div></div>
+      <div class="cell crit risk-only"><div class="n">${bands.Critical}</div><div class="l">Critical</div></div>
+      <div class="cell high risk-only"><div class="n">${bands.High}</div><div class="l">High</div></div>
+      <div class="cell med risk-only"><div class="n">${bands.Medium}</div><div class="l">Medium</div></div>
+      <div class="cell low risk-only"><div class="n">${bands.Low}</div><div class="l">Low</div></div>
+      <div class="cell risk-only"><div class="n" style="color:${againstOpen ? 'var(--c-critical)' : 'var(--text-bright)'}">${againstOpen}</div><div class="l">Against policy</div></div>
+      <div class="cell risk-only"><div class="n" style="color:${exceptions ? 'var(--c-high)' : 'var(--text-bright)'}">${exceptions}</div><div class="l">Exceptions</div></div>
       <div class="cell"><div class="n" style="color:${implicitCount ? 'var(--c-critical)' : 'var(--text-bright)'}">${implicitCount}</div><div class="l">Implicit permits</div></div>
       <div class="cell"><div class="n" style="color:${unloggedCount ? 'var(--c-medium)' : 'var(--text-bright)'}">${unloggedCount}</div><div class="l">No logging</div></div>
     `;
@@ -190,6 +192,21 @@
       renderTable();
     });
   }
+  if (riskToggle) {
+    // Pure presentation switch: scores stay computed, so flipping back is
+    // instant. Hides every scoring-dependent element via body.no-risk.
+    riskToggle.addEventListener('change', () => {
+      riskOn = riskToggle.checked;
+      document.body.classList.toggle('no-risk', !riskOn);
+      if (!riskOn) {
+        if (sortKey === 'score') { sortKey = 'default'; sortDir = 'asc'; }
+        filterBand.value = 'all';
+        if (filterPolicy) filterPolicy.value = 'all';
+        markSortedHeader();
+      }
+      renderTable();
+    });
+  }
   searchBox.addEventListener('input', debounce(renderTable, 150));
   if (showInactiveToggle) {
     showInactiveToggle.addEventListener('change', () => {
@@ -236,13 +253,13 @@
     if (row.type !== 'rule') return false;
     const s = row.scored;
     if (!showInactive && row.inactive) return false;
-    if (filterBand.value !== 'all' && s.band.label !== filterBand.value) return false;
+    if (riskOn && filterBand.value !== 'all' && s.band.label !== filterBand.value) return false;
     if (filterAction.value !== 'all' && s.action !== filterAction.value) return false;
     if (filterImplicit.value === 'implicit' && !row.implicit) return false;
     if (filterImplicit.value === 'explicit' && row.implicit) return false;
     if (filterLogging.value === 'unlogged' && !s.logging.flagged) return false;
     if (filterLogging.value === 'logged' && s.logging.flagged) return false;
-    if (filterPolicy && filterPolicy.value !== 'all') {
+    if (riskOn && filterPolicy && filterPolicy.value !== 'all') {
       const state = effectiveVerdict(row).state;
       if (filterPolicy.value === 'against' && state !== 'open') return false;
       if (filterPolicy.value === 'exception' && state !== 'exception') return false;
@@ -318,7 +335,7 @@
     const inactiveNote = inactiveCount
       ? (showInactive ? ` ${inactiveCount} inactive rule${inactiveCount === 1 ? '' : 's'} shown dimmed.` : ` ${inactiveCount} inactive rule${inactiveCount === 1 ? '' : 's'} hidden \u2014 toggle "Show inactive" to view.`)
       : '';
-    footerNote.textContent = `Showing ${sorted.length} of ${ROWS.filter(r => r.type === 'rule').length} rules.${inactiveNote} Rules are listed in rulebase order \u2014 as they appear in the configuration \u2014 including inactive rules, which keep their position. Risk scoring is heuristic \u2014 use as a triage aid, not a compliance verdict.`;
+    footerNote.textContent = `Showing ${sorted.length} of ${ROWS.filter(r => r.type === 'rule').length} rules.${inactiveNote} Rules are listed in rulebase order \u2014 as they appear in the configuration \u2014 including inactive rules, which keep their position. ${riskOn ? 'Risk scoring is heuristic \u2014 use as a triage aid, not a compliance verdict.' : ''}`;
   }
 
   function buildRuleRow(row) {
@@ -333,13 +350,13 @@
     tr.innerHTML = `
       <td><span class="expand-caret ${isOpen ? 'open' : ''}">\u25B8</span></td>
       <td class="mono rule-number">${row.ruleNumber ?? '\u2014'}</td>
-      <td class="risk-cell">
+      <td class="risk-cell risk-only">
         <div class="risk-bar-wrap">
           <span class="risk-num" style="color:${band.color}">${s.score}</span>${s.buyback && s.buyback.credit > 0 && s.inContextScore < s.score ? `<span class="buyback-tag" title="Compensating controls in the rulebase reduce this to ${s.inContextScore} in-context (−${s.buyback.credit}). Expand for detail.">→ ${s.inContextScore}</span>` : ''}
         </div>
         <div class="risk-band-pill" style="background:${band.color}22; color:${band.color}; border:1px solid ${band.color}55;">${band.label}</div>
       </td>
-      <td><span class="${s.action === 'permit' ? 'action-permit' : 'action-deny'}">${s.action}</span>${row.inactive ? '<span class="inactive-tag">INACTIVE</span>' : ''}${policyPill(row)}</td>
+      <td><span class="${s.action === 'permit' ? 'action-permit' : 'action-deny'}">${s.action}</span>${row.inactive ? '<span class="inactive-tag">INACTIVE</span>' : ''}${riskOn ? policyPill(row) : ''}</td>
       <td class="mono">${(s.services[0] && s.services[0].protocol ? s.services[0].protocol : 'ip').toUpperCase()}</td>
       <td class="mono">${escapeHtml(endpointText(s.srcResolved))}</td>
       <td class="mono">${escapeHtml(endpointText(s.dstResolved))}</td>
@@ -481,6 +498,7 @@
     html += '<div class="detail-section" style="margin-bottom:14px;"><h4>Service / Protocol</h4><div class="member-tree">' + renderServiceTree(row) + '</div></div>';
 
     // score explain
+    if (riskOn) {
     html += '<div class="detail-section"><h4>Risk calculation</h4><div class="score-explain">';
     html += `<div class="row"><span class="k">Exposure (source/destination scope)</span><span>${s.exposure.label} \u2014 ${s.exposure.score}</span></div>`;
     html += `<div class="row"><span class="k">Service risk (worst-case port/protocol)</span><span>${escapeHtml(s.service.name)} \u2014 ${s.service.score}</span></div>`;
@@ -514,6 +532,7 @@
 
     // Policy compliance section (gate, independent of the score).
     html += renderPolicySection(row);
+    }
 
     html += '</div>';
     td.innerHTML = html;
@@ -569,7 +588,7 @@
       const lookup = lookupServiceRisk(proto, svc.destPort);
       const flagged = lookup.score >= 45;
       out += `<li><span class="tag">${proto.toUpperCase()}</span> ${portLabel ? 'port ' + escapeHtml(portLabel) + ' (' + escapeHtml(lookup.name) + ')' : '<em>any port</em>'}`;
-      if (flagged) out += `<span class="flag">\u26A0 risk ${lookup.score}${lookup.note ? ': ' + escapeHtml(lookup.note) : ''}</span>`;
+      if (flagged && riskOn) out += `<span class="flag">\u26A0 risk ${lookup.score}${lookup.note ? ': ' + escapeHtml(lookup.note) : ''}</span>`;
       out += '</li>';
     }
     out += '</ul>';
@@ -584,20 +603,23 @@
   // ---- CSV export ----
   exportBtn.addEventListener('click', () => {
     const ruleRows = sortRows(ROWS.filter(rowMatchesFilters));
-    const header = ['Rule #', 'Score', 'Band', 'Action', 'Inactive', 'Protocol', 'Source', 'Destination', 'Service', 'Interface', 'Direction', 'ACL', 'Implicit', 'Logging', 'Logging Flagged', 'Exposure Label', 'Exposure Score', 'Service Risk Name', 'Service Risk Score'];
+    const header = riskOn
+      ? ['Rule #', 'Score', 'Band', 'Action', 'Inactive', 'Protocol', 'Source', 'Destination', 'Service', 'Interface', 'Direction', 'ACL', 'Implicit', 'Logging', 'Logging Flagged', 'Exposure Label', 'Exposure Score', 'Service Risk Name', 'Service Risk Score']
+      : ['Rule #', 'Action', 'Inactive', 'Protocol', 'Source', 'Destination', 'Service', 'Interface', 'Direction', 'ACL', 'Implicit', 'Logging', 'Logging Flagged'];
     const lines = [header.join(',')];
     for (const row of ruleRows) {
       const s = row.scored;
       const fields = [
         row.ruleNumber ?? '',
-        s.score, s.band.label, s.action,
+        ...(riskOn ? [s.score, s.band.label] : []),
+        s.action,
         row.inactive ? 'yes' : 'no',
         (s.services[0] && s.services[0].protocol) || 'ip',
         endpointText(s.srcResolved), endpointText(s.dstResolved), serviceText(s.services),
         row.interface || '', row.direction || '', row.aclName || '',
         row.implicit ? 'yes' : 'no',
         s.logging.label, s.logging.flagged ? 'yes' : 'no',
-        s.exposure.label, s.exposure.score, s.service.name, s.service.score
+        ...(riskOn ? [s.exposure.label, s.exposure.score, s.service.name, s.service.score] : [])
       ].map(csvEscape);
       lines.push(fields.join(','));
     }
