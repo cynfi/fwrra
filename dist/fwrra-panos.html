@@ -419,6 +419,14 @@ const SYSLOG_LEVEL_NAMES = {
 //     detect(text) -> number                 (confidence 0..N; higher wins, 0 = not mine)
 //     parse(text)  -> config                 (vendor-internal parsed shape)
 //     buildRuleset(config) -> Array<Row>     (the vendor contract ui.js renders)
+//     buildInventory(config, options) -> Inventory | null     (OPTIONAL)
+//         Extra, vendor-specific read-only views rendered by ui.js as a tab.
+//         Inventory = { title, sections: Section[] }
+//         Section   = { id, heading, columns:[{key,label}], rows:[{cells, detail?}] }
+//                   | { id, heading, ruleRows: RuleRow[] }   (scored rule rows)
+//         cell = string | { text, tone?: 'warn'|'dim', note? }
+//         detail block = {kind:'kv'|'networks'|'list', title, ...}
+//         Return null when the config has nothing to show (no tab).
 //   }
 const VENDOR_REGISTRY = [];
 

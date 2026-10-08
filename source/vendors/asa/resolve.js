@@ -464,4 +464,5 @@ registerVendor({
   parse: parseASAConfig,
   buildRuleset: buildRuleset,
   detectRole: detectASARole,
+  buildInventory: buildVpnInventory,
 });
