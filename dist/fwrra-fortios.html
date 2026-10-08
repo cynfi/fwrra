@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Firewall Rule Risk Analyzer (FortiOS) v1.0.8</title>
+<title>Firewall Rule Risk Analyzer (FortiOS) v1.0.9</title>
 <style>
   @font-face { font-family: 'sys-mono'; src: local('JetBrains Mono'), local('SF Mono'), local('Consolas'); }
   :root {
@@ -278,6 +278,14 @@
     color: var(--text-dim); margin: 0 0 8px;
   }
   .inv-section .tag { color: var(--text-dim); font-size: 10.5px; margin-left: 6px; }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .seg button {
+    font-family: var(--mono); font-size: 12px; cursor: pointer; background: var(--panel-2);
+    color: var(--text-dim); border: none; border-right: 1px solid var(--border); padding: 6px 11px;
+  }
+  .seg button:last-child { border-right: none; }
+  .seg button.active { background: var(--accent); color: #fff; }
+  .seg button:disabled { opacity: 0.45; cursor: not-allowed; }
   .grp-bar { display: flex; gap: 8px; margin-bottom: 10px; }
   .grp { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); margin-bottom: 8px; overflow: hidden; }
   .grp-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 9px 12px; cursor: pointer; }
@@ -314,7 +322,7 @@
 <div class="app">
   <div class="header">
     <div>
-      <h1><span class="dot"></span>Firewall Rule Risk Analyzer (FortiOS) <span class="ver">v1.0.8</span></h1>
+      <h1><span class="dot"></span>Firewall Rule Risk Analyzer (FortiOS) <span class="ver">v1.0.9</span></h1>
       <div class="sub">rule exposure &amp; policy scoring &middot; runs entirely in your browser, nothing uploaded</div>
     </div>
     <div class="header-actions" id="headerActions" style="display:none;">
@@ -353,8 +361,14 @@
     <div id="rulesView">
     <div class="summary" id="summary"></div>
     <div class="controls">
-      <select id="filterScope" title="Limit the table, summary and every other filter to one ACL or one interface/zone path (rule direction)">
-        <option value="all">All ACLs / interfaces</option>
+      <select id="filterZone" title="Limit the table, summary and every other filter to one zone / interface">
+        <option value="all">All zones / interfaces</option>
+      </select>
+      <span class="seg" id="filterDir" title="Which side of the rule the zone is on: Any = source or destination, From = source side, To = destination side">
+        <button type="button" data-dir="any" class="active" disabled>Any</button><button type="button" data-dir="from" disabled>From</button><button type="button" data-dir="to" disabled>To</button>
+      </span>
+      <select id="filterAcl" title="Limit to one ACL" style="display:none;">
+        <option value="all">All ACLs</option>
       </select>
       <label class="toggle-label risk-only" for="roleSelect" title="Firewall role changes scoring: Internet-facing treats broad/any outbound as the expected baseline (outbound-to-internet is the box's job); Internal segmentation penalizes broad outbound since data isn't meant to leave a zone. Auto-detected from routing — override here.">
         <span>Role</span>
@@ -1824,6 +1838,8 @@ function fortiBuildRuleset(config, options) {
       scored: e.scored,
       interface: `${srcLabel} → ${dstLabel}`,
       direction: 'policy',
+      fromZones: (policy.srcintf && policy.srcintf.length) ? policy.srcintf : ['any'],
+      toZones: (policy.dstintf && policy.dstintf.length) ? policy.dstintf : ['any'],
       implicit: false,
       inactive: policy.status === 'disable',
       // Sort most-trusted source first, then srcintf name, then evaluation order.
@@ -1890,7 +1906,9 @@ registerVendor({
   const tbody = document.getElementById('ruleTableBody');
   const summaryEl = document.getElementById('summary');
   const filterBand = document.getElementById('filterBand');
-  const filterScope = document.getElementById('filterScope');
+  const filterZone = document.getElementById('filterZone');
+  const filterDir = document.getElementById('filterDir');
+  const filterAcl = document.getElementById('filterAcl');
   const filterAction = document.getElementById('filterAction');
   const filterImplicit = document.getElementById('filterImplicit');
   const filterLogging = document.getElementById('filterLogging');
@@ -1991,54 +2009,90 @@ registerVendor({
     setTab('rules');
   }
 
-  // ---- scope filter (left-most): one ACL or one interface/zone path ----
-  // Vendor-neutral: reads only row.interface / row.aclName / row.direction /
-  // row.implicit. `interface` is the applied interface (ASA) or the src -> dst
-  // path (FortiOS, PAN-OS); ACL names are offered only where one ACL carries
-  // several rules (ASA) - FortiOS/PAN-OS names are per-rule.
+  // ---- scope filters (left-most): zone/interface + side + ACL ----
+  // Vendor-neutral: reads only row.fromZones / row.toZones (source-side and
+  // destination-side zones; ['any'] = wildcard, [] = unknown, never guessed),
+  // row.aclName and row.implicit. ACL options are offered only for names that
+  // carry 2+ rules (ASA ACLs); FortiOS/PAN-OS names are per-rule.
+  let scopeDir = 'any';
+
+  function zoneHit(zones, z) {
+    return !!zones && (zones.includes(z) || zones.includes('any'));
+  }
+
   function inScope(row) {
-    const v = filterScope.value;
-    if (v.startsWith('if:')) return (row.interface || '—') === v.slice(3);
-    if (v.startsWith('acl:')) return !row.implicit && row.aclName === v.slice(4);
+    const z = filterZone.value;
+    if (z !== 'all') {
+      const f = zoneHit(row.fromZones, z), t = zoneHit(row.toZones, z);
+      if (scopeDir === 'from' ? !f : scopeDir === 'to' ? !t : !(f || t)) return false;
+    }
+    const a = filterAcl.value;
+    if (a !== 'all' && (row.implicit || row.aclName !== a)) return false;
     return true;
   }
 
+  function setDir(dir) {
+    scopeDir = dir;
+    filterDir.querySelectorAll('button').forEach(b => b.classList.toggle('active', b.dataset.dir === dir));
+  }
+
   function populateScopeOptions() {
-    const prev = filterScope.value;
-    const paths = new Map();
+    const prevZone = filterZone.value, prevAcl = filterAcl.value;
+    const zones = new Map();
     const acls = new Map();
     for (const r of ROWS) {
       if (r.type !== 'rule') continue;
-      const p = r.interface || '—';
-      paths.set(p, (paths.get(p) || 0) + 1);
+      const seen = new Set();
+      for (const z of (r.fromZones || []).concat(r.toZones || [])) {
+        if (z === 'any' || seen.has(z)) continue;
+        seen.add(z);
+        zones.set(z, (zones.get(z) || 0) + 1);
+      }
       if (r.aclName && !r.implicit) {
         const a = acls.get(r.aclName) || { n: 0, where: [] };
         a.n++;
-        const where = p + ((r.direction === 'in' || r.direction === 'out') ? ' ' + r.direction : '');
+        const where = (r.interface || '') + ((r.direction === 'in' || r.direction === 'out') ? ' ' + r.direction : '');
         if (!a.where.includes(where)) a.where.push(where);
         acls.set(r.aclName, a);
       }
     }
-    filterScope.innerHTML = '';
-    const add = (parent, value, text) => {
-      const o = document.createElement('option');
-      o.value = value;
-      o.textContent = text;
-      parent.appendChild(o);
+    const fill = (sel, allText, entries, prev) => {
+      sel.innerHTML = '';
+      const add = (value, text) => {
+        const o = document.createElement('option');
+        o.value = value;
+        o.textContent = text;
+        sel.appendChild(o);
+      };
+      add('all', allText);
+      entries.forEach(([value, text]) => add(value, text));
+      sel.value = Array.from(sel.options).some(o => o.value === prev) ? prev : 'all';
     };
-    add(filterScope, 'all', 'All ACLs / interfaces');
-    const group = (label, entries) => {
-      if (!entries.length) return;
-      const g = document.createElement('optgroup');
-      g.label = label;
-      entries.forEach(([value, text]) => add(g, value, text));
-      filterScope.appendChild(g);
-    };
-    group('Interface / path', Array.from(paths, ([p, n]) => ['if:' + p, `${p} (${n})`]));
-    group('ACL', Array.from(acls).filter(([, a]) => a.n >= 2)
-      .map(([name, a]) => ['acl:' + name, `${name} (${a.where.join(', ')}) (${a.n})`]));
-    filterScope.value = Array.from(filterScope.options).some(o => o.value === prev) ? prev : 'all';
+    fill(filterZone, 'All zones / interfaces', Array.from(zones, ([z, n]) => [z, `${z} (${n})`]), prevZone);
+    const aclEntries = Array.from(acls).filter(([, a]) => a.n >= 2)
+      .map(([name, a]) => [name, `${name} (${a.where.join(', ')}) (${a.n})`]);
+    fill(filterAcl, 'All ACLs', aclEntries, prevAcl);
+    filterAcl.style.display = aclEntries.length ? '' : 'none';
+    syncDirEnabled();
   }
+
+  function syncDirEnabled() {
+    const off = filterZone.value === 'all';
+    filterDir.querySelectorAll('button').forEach(b => { b.disabled = off; });
+  }
+
+  function onScopeChange() {
+    syncDirEnabled();
+    renderSummary();
+    renderTable();
+  }
+  filterZone.addEventListener('change', onScopeChange);
+  filterAcl.addEventListener('change', onScopeChange);
+  filterDir.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+    if (b.disabled) return;
+    setDir(b.dataset.dir);
+    onScopeChange();
+  }));
 
   // ---- summary strip ----
   function renderSummary() {
@@ -2107,7 +2161,6 @@ registerVendor({
   }
 
   filterBand.addEventListener('change', renderTable);
-  filterScope.addEventListener('change', () => { renderSummary(); renderTable(); });
   filterAction.addEventListener('change', renderTable);
   filterImplicit.addEventListener('change', renderTable);
   filterLogging.addEventListener('change', renderTable);

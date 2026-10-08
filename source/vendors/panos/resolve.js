@@ -296,6 +296,8 @@ function panBuildRuleset(config, options) {
       scored: e.scored,
       interface: `${fromLabel} → ${toLabel}`,
       direction: 'rule',
+      fromZones: (rule.from && rule.from.length) ? rule.from : ['any'],
+      toZones: (rule.to && rule.to.length) ? rule.to : ['any'],
       implicit: false,
       inactive: !!rule.disabled,
       defaultOrder: { level: trust, ifName: (rule.from && rule.from[0]) || '', ruleNumber: seq },

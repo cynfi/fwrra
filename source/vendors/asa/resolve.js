@@ -315,6 +315,10 @@ function buildRuleset(config, options) {
           scored,
           interface: app.interface,
           direction: app.direction,
+          // Strict: an ACL only knows the interface it is bound to. Inbound = that
+          // interface is the source side; outbound = the destination side.
+          fromZones: app.direction === 'in' ? [app.interface] : [],
+          toZones: app.direction === 'out' ? [app.interface] : [],
           implicit: false,
           inactive: !!entry.inactive,
           defaultOrder: { level: orderKey.level, ifName: orderKey.name, ruleNumber },
@@ -367,6 +371,8 @@ function buildRuleset(config, options) {
         scored,
         interface: `${highIf} \u2192 ${lowIf}`,
         direction: 'implicit',
+        fromZones: [highIf],
+        toZones: [lowIf],
         implicit: true,
         implicitNote: `No inbound ACL on '${highIf}' (level ${highLevel}) \u2014 default ASA behavior implicitly permits all traffic to '${lowIf}' (level ${lowLevel}).`,
         // Implicit rules sort after all explicit rules for their source interface, grouped by that interface's security order.

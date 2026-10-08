@@ -24,7 +24,9 @@
   const tbody = document.getElementById('ruleTableBody');
   const summaryEl = document.getElementById('summary');
   const filterBand = document.getElementById('filterBand');
-  const filterScope = document.getElementById('filterScope');
+  const filterZone = document.getElementById('filterZone');
+  const filterDir = document.getElementById('filterDir');
+  const filterAcl = document.getElementById('filterAcl');
   const filterAction = document.getElementById('filterAction');
   const filterImplicit = document.getElementById('filterImplicit');
   const filterLogging = document.getElementById('filterLogging');
@@ -125,54 +127,90 @@
     setTab('rules');
   }
 
-  // ---- scope filter (left-most): one ACL or one interface/zone path ----
-  // Vendor-neutral: reads only row.interface / row.aclName / row.direction /
-  // row.implicit. `interface` is the applied interface (ASA) or the src -> dst
-  // path (FortiOS, PAN-OS); ACL names are offered only where one ACL carries
-  // several rules (ASA) - FortiOS/PAN-OS names are per-rule.
+  // ---- scope filters (left-most): zone/interface + side + ACL ----
+  // Vendor-neutral: reads only row.fromZones / row.toZones (source-side and
+  // destination-side zones; ['any'] = wildcard, [] = unknown, never guessed),
+  // row.aclName and row.implicit. ACL options are offered only for names that
+  // carry 2+ rules (ASA ACLs); FortiOS/PAN-OS names are per-rule.
+  let scopeDir = 'any';
+
+  function zoneHit(zones, z) {
+    return !!zones && (zones.includes(z) || zones.includes('any'));
+  }
+
   function inScope(row) {
-    const v = filterScope.value;
-    if (v.startsWith('if:')) return (row.interface || '—') === v.slice(3);
-    if (v.startsWith('acl:')) return !row.implicit && row.aclName === v.slice(4);
+    const z = filterZone.value;
+    if (z !== 'all') {
+      const f = zoneHit(row.fromZones, z), t = zoneHit(row.toZones, z);
+      if (scopeDir === 'from' ? !f : scopeDir === 'to' ? !t : !(f || t)) return false;
+    }
+    const a = filterAcl.value;
+    if (a !== 'all' && (row.implicit || row.aclName !== a)) return false;
     return true;
   }
 
+  function setDir(dir) {
+    scopeDir = dir;
+    filterDir.querySelectorAll('button').forEach(b => b.classList.toggle('active', b.dataset.dir === dir));
+  }
+
   function populateScopeOptions() {
-    const prev = filterScope.value;
-    const paths = new Map();
+    const prevZone = filterZone.value, prevAcl = filterAcl.value;
+    const zones = new Map();
     const acls = new Map();
     for (const r of ROWS) {
       if (r.type !== 'rule') continue;
-      const p = r.interface || '—';
-      paths.set(p, (paths.get(p) || 0) + 1);
+      const seen = new Set();
+      for (const z of (r.fromZones || []).concat(r.toZones || [])) {
+        if (z === 'any' || seen.has(z)) continue;
+        seen.add(z);
+        zones.set(z, (zones.get(z) || 0) + 1);
+      }
       if (r.aclName && !r.implicit) {
         const a = acls.get(r.aclName) || { n: 0, where: [] };
         a.n++;
-        const where = p + ((r.direction === 'in' || r.direction === 'out') ? ' ' + r.direction : '');
+        const where = (r.interface || '') + ((r.direction === 'in' || r.direction === 'out') ? ' ' + r.direction : '');
         if (!a.where.includes(where)) a.where.push(where);
         acls.set(r.aclName, a);
       }
     }
-    filterScope.innerHTML = '';
-    const add = (parent, value, text) => {
-      const o = document.createElement('option');
-      o.value = value;
-      o.textContent = text;
-      parent.appendChild(o);
+    const fill = (sel, allText, entries, prev) => {
+      sel.innerHTML = '';
+      const add = (value, text) => {
+        const o = document.createElement('option');
+        o.value = value;
+        o.textContent = text;
+        sel.appendChild(o);
+      };
+      add('all', allText);
+      entries.forEach(([value, text]) => add(value, text));
+      sel.value = Array.from(sel.options).some(o => o.value === prev) ? prev : 'all';
     };
-    add(filterScope, 'all', 'All ACLs / interfaces');
-    const group = (label, entries) => {
-      if (!entries.length) return;
-      const g = document.createElement('optgroup');
-      g.label = label;
-      entries.forEach(([value, text]) => add(g, value, text));
-      filterScope.appendChild(g);
-    };
-    group('Interface / path', Array.from(paths, ([p, n]) => ['if:' + p, `${p} (${n})`]));
-    group('ACL', Array.from(acls).filter(([, a]) => a.n >= 2)
-      .map(([name, a]) => ['acl:' + name, `${name} (${a.where.join(', ')}) (${a.n})`]));
-    filterScope.value = Array.from(filterScope.options).some(o => o.value === prev) ? prev : 'all';
+    fill(filterZone, 'All zones / interfaces', Array.from(zones, ([z, n]) => [z, `${z} (${n})`]), prevZone);
+    const aclEntries = Array.from(acls).filter(([, a]) => a.n >= 2)
+      .map(([name, a]) => [name, `${name} (${a.where.join(', ')}) (${a.n})`]);
+    fill(filterAcl, 'All ACLs', aclEntries, prevAcl);
+    filterAcl.style.display = aclEntries.length ? '' : 'none';
+    syncDirEnabled();
   }
+
+  function syncDirEnabled() {
+    const off = filterZone.value === 'all';
+    filterDir.querySelectorAll('button').forEach(b => { b.disabled = off; });
+  }
+
+  function onScopeChange() {
+    syncDirEnabled();
+    renderSummary();
+    renderTable();
+  }
+  filterZone.addEventListener('change', onScopeChange);
+  filterAcl.addEventListener('change', onScopeChange);
+  filterDir.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+    if (b.disabled) return;
+    setDir(b.dataset.dir);
+    onScopeChange();
+  }));
 
   // ---- summary strip ----
   function renderSummary() {
@@ -241,7 +279,6 @@
   }
 
   filterBand.addEventListener('change', renderTable);
-  filterScope.addEventListener('change', () => { renderSummary(); renderTable(); });
   filterAction.addEventListener('change', renderTable);
   filterImplicit.addEventListener('change', renderTable);
   filterLogging.addEventListener('change', renderTable);

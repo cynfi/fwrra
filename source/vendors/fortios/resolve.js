@@ -356,6 +356,8 @@ function fortiBuildRuleset(config, options) {
       scored: e.scored,
       interface: `${srcLabel} → ${dstLabel}`,
       direction: 'policy',
+      fromZones: (policy.srcintf && policy.srcintf.length) ? policy.srcintf : ['any'],
+      toZones: (policy.dstintf && policy.dstintf.length) ? policy.dstintf : ['any'],
       implicit: false,
       inactive: policy.status === 'disable',
       // Sort most-trusted source first, then srcintf name, then evaluation order.
