@@ -353,6 +353,9 @@
     <div id="rulesView">
     <div class="summary" id="summary"></div>
     <div class="controls">
+      <select id="filterScope" title="Limit the table, summary and every other filter to one ACL or one interface/zone path (rule direction)">
+        <option value="all">All ACLs / interfaces</option>
+      </select>
       <label class="toggle-label risk-only" for="roleSelect" title="Firewall role changes scoring: Internet-facing treats broad/any outbound as the expected baseline (outbound-to-internet is the box's job); Internal segmentation penalizes broad outbound since data isn't meant to leave a zone. Auto-detected from routing — override here.">
         <span>Role</span>
         <select id="roleSelect">

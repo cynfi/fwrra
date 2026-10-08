@@ -32,6 +32,9 @@ codebase is laid out.
   numbered by its position in its own rule list. You can sort by any
   column and jump back to this default order with one click.
 
+- A left-most **Scope** filter limits the table, the summary strip, the CSV export
+  and every other filter to one interface/zone path (the rule's direction) or,
+  on ASA, one ACL - so you can isolate and screenshot a single direction.
 - A **Risk analysis** switch (top right) hides every score, band, policy
   verdict and score-based filter/column — useful for clean audit screenshots of
   the rules. The CSV export drops its score columns too.

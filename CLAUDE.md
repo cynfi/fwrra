@@ -410,6 +410,11 @@ with them unless a vendor's model genuinely doesn't fit:
   since silent denies hide attack/recon traffic. This severity asymmetry
   should carry over to every vendor's `classifyLogging()`.
 
+- **Scope filter (left-most).** `#filterScope` limits table, summary strip, CSV
+  and all other filters (AND) to one `row.interface` value (applied interface on
+  ASA; `src -> dst` path on FortiOS/PAN-OS) or one ACL name. The ACL group lists
+  only names shared by 2+ rules (ASA ACLs; FortiOS/PAN-OS names are per-rule).
+  Vendor-neutral: reads only `row.interface/aclName/direction/implicit`.
 - **Risk analysis toggle.** A header switch (`#riskToggle`, on by default) puts
   `body.no-risk` on the page; everything score-dependent carries `.risk-only`
   and is hidden by CSS, with small JS guards for sort/filter/CSV/footer/detail.

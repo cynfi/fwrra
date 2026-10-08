@@ -24,6 +24,7 @@
   const tbody = document.getElementById('ruleTableBody');
   const summaryEl = document.getElementById('summary');
   const filterBand = document.getElementById('filterBand');
+  const filterScope = document.getElementById('filterScope');
   const filterAction = document.getElementById('filterAction');
   const filterImplicit = document.getElementById('filterImplicit');
   const filterLogging = document.getElementById('filterLogging');
@@ -117,10 +118,60 @@
     resultsContainer.style.display = '';
     headerActions.style.display = 'flex';
     if (file) renderFileInfo(file, CONFIG, ROWS.filter(r => r.type === 'rule').length);
+    populateScopeOptions();
     renderSummary();
     markSortedHeader();
     renderTable();
     setTab('rules');
+  }
+
+  // ---- scope filter (left-most): one ACL or one interface/zone path ----
+  // Vendor-neutral: reads only row.interface / row.aclName / row.direction /
+  // row.implicit. `interface` is the applied interface (ASA) or the src -> dst
+  // path (FortiOS, PAN-OS); ACL names are offered only where one ACL carries
+  // several rules (ASA) - FortiOS/PAN-OS names are per-rule.
+  function inScope(row) {
+    const v = filterScope.value;
+    if (v.startsWith('if:')) return (row.interface || '—') === v.slice(3);
+    if (v.startsWith('acl:')) return !row.implicit && row.aclName === v.slice(4);
+    return true;
+  }
+
+  function populateScopeOptions() {
+    const prev = filterScope.value;
+    const paths = new Map();
+    const acls = new Map();
+    for (const r of ROWS) {
+      if (r.type !== 'rule') continue;
+      const p = r.interface || '—';
+      paths.set(p, (paths.get(p) || 0) + 1);
+      if (r.aclName && !r.implicit) {
+        const a = acls.get(r.aclName) || { n: 0, where: [] };
+        a.n++;
+        const where = p + ((r.direction === 'in' || r.direction === 'out') ? ' ' + r.direction : '');
+        if (!a.where.includes(where)) a.where.push(where);
+        acls.set(r.aclName, a);
+      }
+    }
+    filterScope.innerHTML = '';
+    const add = (parent, value, text) => {
+      const o = document.createElement('option');
+      o.value = value;
+      o.textContent = text;
+      parent.appendChild(o);
+    };
+    add(filterScope, 'all', 'All ACLs / interfaces');
+    const group = (label, entries) => {
+      if (!entries.length) return;
+      const g = document.createElement('optgroup');
+      g.label = label;
+      entries.forEach(([value, text]) => add(g, value, text));
+      filterScope.appendChild(g);
+    };
+    group('Interface / path', Array.from(paths, ([p, n]) => ['if:' + p, `${p} (${n})`]));
+    group('ACL', Array.from(acls).filter(([, a]) => a.n >= 2)
+      .map(([name, a]) => ['acl:' + name, `${name} (${a.where.join(', ')}) (${a.n})`]));
+    filterScope.value = Array.from(filterScope.options).some(o => o.value === prev) ? prev : 'all';
   }
 
   // ---- summary strip ----
@@ -128,7 +179,7 @@
     // Active (non-inactive) rules are what the firewall actually enforces, so the
     // summary strip counts those - inactive ACEs are visible in the table (when the
     // "Show inactive" toggle is on) but don't factor into these headline stats.
-    const ruleRows = ROWS.filter(r => r.type === 'rule' && !r.inactive);
+    const ruleRows = ROWS.filter(r => r.type === 'rule' && !r.inactive && inScope(r));
     const bands = { Critical: 0, High: 0, Medium: 0, Low: 0, None: 0 };
     let implicitCount = 0;
     let unloggedCount = 0;
@@ -190,6 +241,7 @@
   }
 
   filterBand.addEventListener('change', renderTable);
+  filterScope.addEventListener('change', () => { renderSummary(); renderTable(); });
   filterAction.addEventListener('change', renderTable);
   filterImplicit.addEventListener('change', renderTable);
   filterLogging.addEventListener('change', renderTable);
@@ -203,6 +255,7 @@
       CURRENT_ROLE = roleSelect.value;
       ROWS = CURRENT_VENDOR.buildRuleset(CONFIG, { firewallRole: CURRENT_ROLE });
       EXPANDED = new Set();
+      populateScopeOptions();
       renderSummary();
       renderTable();
     });
@@ -267,6 +320,7 @@
 
   function rowMatchesFilters(row) {
     if (row.type !== 'rule') return false;
+    if (!inScope(row)) return false;
     const s = row.scored;
     if (!showInactive && row.inactive) return false;
     if (riskOn && filterBand.value !== 'all' && s.band.label !== filterBand.value) return false;
