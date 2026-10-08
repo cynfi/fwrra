@@ -98,17 +98,6 @@ calculation sections in this tab too. VPN-filter ACEs always use direction
 ACEs are emitted once per distinct (ACL, ACE) with a *Used by* list of the
 identities that use the ACL. Document the hook in `CLAUDE.md`.
 
-## 4a. Grouping by VPN policy (revised 2026-10-08, v1.0.6)
-The VPN tab is one collapsible block per group-policy (collapsed by default;
-`+`/`-` per block, Expand all / Collapse all) instead of one table per object
-type. Each block holds: effective settings (with inheritance notes), the
-tunnel-groups using it, user overrides landing in it, its scored vpn-filter
-rules, and its findings. Inventory contract gains a `groups` section type.
-Placement: tunnel-group -> its default-group-policy (else DfltGrpPolicy); user ->
-vpn-group-policy, else the group-lock'ed tunnel-group's policy, else
-`Global / unassigned` (which also holds unused pools and global findings). The
-CSV export is per policy with a leading `Policy` column.
-
 ## 4. UI
 Two tabs under the file-info strip when the hook exists: "Rules" (current view)
 and "Remote-access VPN". VPN tab sections: Tunnel-groups, Group-policies, User

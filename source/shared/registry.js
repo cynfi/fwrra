@@ -20,8 +20,6 @@
 //         Inventory = { title, sections: Section[] }
 //         Section   = { id, heading, columns:[{key,label}], rows:[{cells, detail?}] }
 //                   | { id, heading, ruleRows: RuleRow[] }   (scored rule rows)
-//                   | { id, heading, groups: [{ key, title, summary: cell[], sections: Section[] }] }
-//                       (collapsible blocks, collapsed by default, +/- per block and expand/collapse all)
 //         cell = string | { text, tone?: 'warn'|'dim', note? }
 //         detail block = {kind:'kv'|'networks'|'list', title, ...}
 //         Return null when the config has nothing to show (no tab).
