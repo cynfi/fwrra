@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Firewall Rule Risk Analyzer (PAN-OS)</title>
+<title>Firewall Rule Risk Analyzer (PAN-OS) v1.0.5</title>
 <style>
   @font-face { font-family: 'sys-mono'; src: local('JetBrains Mono'), local('SF Mono'), local('Consolas'); }
   :root {
@@ -49,6 +49,7 @@
     color: var(--text-bright); margin: 0;
     display: flex; align-items: center; gap: 10px;
   }
+  .header h1 .ver { font-family: var(--mono); font-size: 12px; font-weight: 400; color: var(--text-dim); margin-left: 8px; }
   .header h1 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex-shrink:0; }
   .header .sub { font-size: 12.5px; color: var(--text-dim); margin-top: 4px; font-family: var(--mono); }
   .header-actions { display: flex; gap: 8px; align-items: center; }
@@ -277,7 +278,7 @@
 <div class="app">
   <div class="header">
     <div>
-      <h1><span class="dot"></span>Firewall Rule Risk Analyzer (PAN-OS)</h1>
+      <h1><span class="dot"></span>Firewall Rule Risk Analyzer (PAN-OS) <span class="ver">v1.0.5</span></h1>
       <div class="sub">rule exposure &amp; policy scoring &middot; runs entirely in your browser, nothing uploaded</div>
     </div>
     <div class="header-actions" id="headerActions" style="display:none;">

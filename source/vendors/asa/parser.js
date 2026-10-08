@@ -192,7 +192,7 @@ function parseASAConfig(text) {
     i++;
   }
 
-  return { objects, groups, interfaces, acls, accessGroups };
+  return { objects, groups, interfaces, acls, accessGroups, ...parseASAVpn(lines) };
 }
 
 // Parses the remainder of an "access-list ... extended ..." line

@@ -37,6 +37,9 @@ const OUT_DIR = path.join(__dirname, 'dist');
 // and source/vendors/<name>/resolve.js.
 const VENDORS = ['asa', 'fortios', 'panos'];
 
+// Shown in the page title and header; bump on each release.
+const VERSION = '1.0.5';
+
 function read(...parts) {
   return fs.readFileSync(path.join(SRC, ...parts), 'utf8');
 }
@@ -58,7 +61,13 @@ function vendorEngine(vendorName) {
   const dir = ['vendors', vendorName];
   // parser.js must load before resolve.js: resolve.js's scoreEntry()/
   // buildRuleset() consume the parsed-config shape parser.js produces.
-  const body = [read(...dir, 'parser.js'), read(...dir, 'resolve.js')].join('\n');
+  // parser.js and resolve.js are required; vpn-parser.js / vpn-resolve.js are
+  // optional per-vendor extras. Order matters only for top-level `const`s:
+  // function declarations hoist within the vendor IIFE.
+  const ORDER = ['parser.js', 'vpn-parser.js', 'resolve.js', 'vpn-resolve.js'];
+  const REQUIRED = ['parser.js', 'resolve.js'];
+  const files = ORDER.filter(f => REQUIRED.includes(f) || fs.existsSync(path.join(SRC, ...dir, f)));
+  const body = files.map(f => read(...dir, f)).join('\n');
   // Wrap each vendor's engine in its OWN IIFE. Without this, every vendor's
   // top-level declarations (buildRuleset, scoreEntry, resolveEndpoint,
   // classifyLogging, tokenize, ...) would be globals and the second vendor
@@ -85,7 +94,7 @@ function buildOne(template, vendorNames, outFile) {
   const single = vendorNames.length === 1 ? vendorNames[0] : null;
   const vendorSuffix = single ? ` (${VENDOR_TITLES[single] || single})` : '';
   const dropName = single ? (VENDOR_TITLES[single] || single) : 'firewall';
-  html = html.split('{{VENDOR_SUFFIX}}').join(vendorSuffix).split('{{DROP_NAME}}').join(dropName);
+  html = html.split('{{VENDOR_SUFFIX}}').join(vendorSuffix).split('{{DROP_NAME}}').join(dropName).split('{{VERSION}}').join(VERSION);
   if (!html.includes('<script id="engine-scripts"></script>')) {
     throw new Error('template.html is missing the empty <script id="engine-scripts"></script> placeholder');
   }
