@@ -2099,7 +2099,12 @@ registerVendor({
 const VPN_DFLT = 'DfltGrpPolicy';
 const VPN_ROW_ID_BASE = 100000;
 
-function vpnIsRemoteAccess(tg) { return tg.type === 'remote-access' || tg.type === 'ipsec-ra'; }
+// show run omits the `type` line for the built-in default groups, so a
+// type-less DefaultRAGroup / DefaultWEBVPNGroup is still a remote-access group.
+function vpnIsRemoteAccess(tg) {
+  return tg.type === 'remote-access' || tg.type === 'ipsec-ra' ||
+    (tg.type === null && /^Default(RA|WEBVPN)Group$/.test(tg.name));
+}
 
 function vpnCell(text, tone, note) {
   const c = { text };
@@ -2113,7 +2118,10 @@ function vpnChain(config, ownerKind, owner) {
   let gpName = null;
   if (ownerKind === 'user') {
     chain.push({ source: 'user', label: owner.name, obj: owner });
-    gpName = owner.vpnGroupPolicy || null;
+    // No explicit vpn-group-policy: the user lands in its group-lock'ed
+    // tunnel-group and inherits that group's default group-policy.
+    const locked = owner.groupLock && config.tunnelGroups[owner.groupLock];
+    gpName = owner.vpnGroupPolicy || (locked && locked.defaultGroupPolicy) || null;
   } else if (ownerKind === 'tunnel-group') {
     gpName = owner.defaultGroupPolicy || null;
   } else {

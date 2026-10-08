@@ -127,4 +127,45 @@ module.exports = async () => {
   assert.strictEqual(contrRows[2].scored.score, 0);
   assert.strictEqual(contrRows[2].scored.srcResolved.kind, 'any', 'deny rows must carry resolved endpoints');
   assert.ok(contrRows[2].scored.services.length >= 1);
+
+  // ---- Final-review fixes ----
+  // group-lock without vpn-group-policy: inherit the locked tunnel-group's default group-policy
+  const lock = [
+    'ip local pool P 10.2.0.1-10.2.0.9 mask 255.255.255.0',
+    'access-list ENGF extended permit tcp 10.2.0.0 255.255.255.0 host 10.0.0.5 eq 22',
+    'group-policy GP_ENG internal',
+    'group-policy GP_ENG attributes',
+    ' vpn-filter value ENGF',
+    ' split-tunnel-policy excludespecified',
+    ' split-tunnel-network-list value NONE',
+    'tunnel-group ENG type remote-access',
+    'tunnel-group ENG general-attributes',
+    ' address-pool P',
+    ' default-group-policy GP_ENG',
+    'username bob attributes',
+    ' group-lock value ENG',
+    '',
+  ].join('\n');
+  const linv = plain(asa.buildInventory(asa.parse(lock), {}));
+  const bob = linv.sections.find(s => s.id === 'users').rows.find(r => ct(r.cells.name) === 'bob');
+  assert.strictEqual(ct(bob.cells.filter), 'ENGF', 'user inherits locked tunnel-group policy filter');
+  assert.strictEqual(note(bob.cells.filter), 'from GP_ENG');
+  assert.strictEqual(ct(bob.cells.split), 'Enabled (exclude)');
+  const lf = linv.sections.find(s => s.id === 'findings').rows.map(r => `${ct(r.cells.subject)}|${ct(r.cells.finding)}`);
+  assert.ok(!lf.some(x => /user bob\|no vpn-filter/.test(x)), 'no false "no vpn-filter" for bob');
+
+  // built-in default tunnel-groups have no "type" line in show run
+  const builtin = [
+    'group-policy GPW internal',
+    'group-policy GPW attributes',
+    ' vpn-filter value WF',
+    'access-list WF extended permit ip 10.3.0.0 255.255.255.0 any',
+    'tunnel-group DefaultWEBVPNGroup general-attributes',
+    ' default-group-policy GPW',
+    '',
+  ].join('\n');
+  const binv = plain(asa.buildInventory(asa.parse(builtin), {}));
+  assert.ok(binv, 'built-in default group alone must produce an inventory');
+  const btg = binv.sections.find(s => s.id === 'tunnel-groups').rows.map(r => ct(r.cells.name));
+  assert.deepStrictEqual(btg, ['DefaultWEBVPNGroup']);
 };
