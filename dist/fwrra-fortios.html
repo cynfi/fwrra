@@ -2600,6 +2600,7 @@ registerVendor({
 
   // ---- CSV export ----
   exportBtn.addEventListener('click', () => {
+    if (activeTab === 'inventory' && INVENTORY) { exportInventoryCsv(); return; }
     const ruleRows = sortRows(ROWS.filter(rowMatchesFilters));
     const header = riskOn
       ? ['Rule #', 'Score', 'Band', 'Action', 'Inactive', 'Protocol', 'Source', 'Destination', 'Service', 'Interface', 'Direction', 'ACL', 'Implicit', 'Logging', 'Logging Flagged', 'Exposure Label', 'Exposure Score', 'Service Risk Name', 'Service Risk Score']
@@ -2621,14 +2622,48 @@ registerVendor({
       ].map(csvEscape);
       lines.push(fields.join(','));
     }
-    const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+    downloadCsv(lines.join('\n'), 'asa-rule-risk-export.csv');
+  });
+
+  function downloadCsv(text, filename) {
+    const blob = new Blob([text], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'asa-rule-risk-export.csv';
+    a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
-  });
+  }
+
+  function exportInventoryCsv() {
+    const q = invSearch.value.trim().toLowerCase();
+    const out = [];
+    for (const sec of INVENTORY.sections) {
+      out.push(csvEscape('# ' + sec.heading));
+      if (sec.ruleRows) {
+        out.push(['ACL', 'Rule #', ...(riskOn ? ['Score', 'Band'] : []), 'Action', 'Inactive', 'Protocol',
+          'Source', 'Destination', 'Service', 'Logging', 'Used by'].join(','));
+        for (const row of sec.ruleRows.filter(r => ruleRowMatchesQuery(r, q))) {
+          const s = row.scored;
+          out.push([row.aclName, row.ruleNumber, ...(riskOn ? [s.score, s.band.label] : []), s.action,
+            row.inactive ? 'yes' : 'no', (s.services[0] && s.services[0].protocol) || 'ip',
+            endpointText(s.srcResolved), endpointText(s.dstResolved), serviceText(s.services),
+            s.logging.label, (row.usedBy || []).join('; ')].map(csvEscape).join(','));
+        }
+      } else {
+        out.push(sec.columns.map(c => csvEscape(c.label)).join(','));
+        for (const row of sec.rows.filter(r => invRowMatches(r, q))) {
+          out.push(sec.columns.map(c => {
+            const v = row.cells[c.key];
+            const n = v && typeof v === 'object' && v.note ? ` (${v.note})` : '';
+            return csvEscape(cellText(v) + n);
+          }).join(','));
+        }
+      }
+      out.push('');
+    }
+    downloadCsv(out.join('\n'), 'asa-vpn-inventory.csv');
+  }
 
   function csvEscape(v) {
     const s = String(v ?? '');

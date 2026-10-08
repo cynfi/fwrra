@@ -88,4 +88,26 @@ module.exports = async () => {
   e.d.getElementById('inventoryTabBtn').click();
   assert.strictEqual(e.d.querySelectorAll('#invBody img').length, 0, 'no live <img> from config text');
   assert.ok(e.d.getElementById('invBody').textContent.includes('<img/src=x/onerror=alert(1)>'));
+
+  // ---- VPN CSV export ----
+  const g = await loadPage('fwrra-asa.html', fixture('asa-vpn.cfg'));
+  let csv = '';
+  g.w.Blob = function (parts) { csv = parts.join(''); };
+  g.w.URL.createObjectURL = () => 'blob:x';
+  g.w.URL.revokeObjectURL = () => {};
+  g.w.HTMLAnchorElement.prototype.click = function () {};
+  g.d.getElementById('inventoryTabBtn').click();
+  g.d.getElementById('exportBtn').click();
+  assert.ok(csv.includes('# Tunnel-groups') && csv.includes('# VPN filter rules') && csv.includes('# Findings'));
+  assert.ok(csv.includes('ACL,Rule #,Score,Band,Action'), 'risk ON: score columns present');
+  assert.ok(csv.includes('Enabled (include) (from ENG_GP)'), 'cell notes are exported');
+  const rt = g.d.getElementById('riskToggle');
+  rt.checked = false; rt.dispatchEvent(new g.w.Event('change'));
+  g.d.getElementById('exportBtn').click();
+  assert.ok(csv.includes('ACL,Rule #,Action'), 'risk OFF: header without score');
+  assert.ok(!csv.includes(',Score,') && !csv.includes(',Band,'));
+  // rules tab export is unchanged: starts with the rule header
+  g.d.querySelector('[data-tab="rules"]').click();
+  g.d.getElementById('exportBtn').click();
+  assert.ok(csv.startsWith('Rule #,'));
 };
