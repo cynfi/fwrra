@@ -282,20 +282,32 @@ function vpnFindings(config, tgInfos, userInfos) {
   return out;
 }
 
-// One scored rule row per distinct (vpn-filter ACL, ACE), with the identities
-// that use it. Direction is 'internal' (client -> internal, symmetric blend).
-function vpnFilterRuleRows(config, infos) {
-  const usedBy = new Map(); // aclName -> ["tunnel-group ENG", ...]
+// Which group-policy does this identity land in?
+function vpnPolicyOf(config, info) {
+  const o = info.owner;
+  if (info.kind === 'group-policy') return o.name;
+  if (info.kind === 'tunnel-group') return o.defaultGroupPolicy || VPN_DFLT;
+  const locked = o.groupLock && config.tunnelGroups[o.groupLock];
+  return o.vpnGroupPolicy || (locked && locked.defaultGroupPolicy) || '—';
+}
+
+// One expandable group per UNIQUE vpn-filter ACL, however many policies use it:
+// who uses it (and which policy each lands in) plus its scored rules, once.
+// Direction is 'internal' (client -> internal, symmetric blend).
+function vpnFilterGroups(config, infos) {
+  const byAcl = new Map(); // aclName -> [identity info, ...]
   for (const info of infos) {
     if (!info.filter.aclName) continue;
-    if (!usedBy.has(info.filter.aclName)) usedBy.set(info.filter.aclName, []);
-    usedBy.get(info.filter.aclName).push(`${info.kind} ${info.name}`);
+    if (!byAcl.has(info.filter.aclName)) byAcl.set(info.filter.aclName, []);
+    byAcl.get(info.filter.aclName).push(info);
   }
-  const rows = [];
-  let id = VPN_ROW_ID_BASE;
-  for (const [aclName, users] of usedBy) {
+  const groups = [];
+  let nextId = VPN_ROW_ID_BASE;
+  for (const [aclName, users] of byAcl) {
     const acl = config.acls[aclName];
     if (!acl) continue;
+    const usedBy = users.map(i => `${i.kind} ${i.name}`);
+    const ruleRows = [];
     let seq = 0;
     for (const entry of acl) {
       if (entry.remark) continue;
@@ -306,14 +318,42 @@ function vpnFilterRuleRows(config, infos) {
         scored.dstResolved = resolveEndpoint(config, entry.dst);
         scored.services = resolveRuleServices(config, entry);
       }
-      rows.push({
-        id: id++, type: 'rule', aclName, ruleNumber: seq, entry, scored,
+      ruleRows.push({
+        id: nextId++, type: 'rule', aclName, ruleNumber: seq, entry, scored,
         interface: 'vpn-filter', direction: 'vpn-filter', implicit: false,
-        inactive: !!entry.inactive, usedBy: users,
+        inactive: !!entry.inactive, usedBy,
       });
     }
+    const policies = [];
+    for (const i of users) {
+      const p = vpnPolicyOf(config, i);
+      if (p !== '—' && !policies.includes(p)) policies.push(p);
+    }
+    const top = ruleRows.reduce((m, r) => (!m || r.scored.score > m.scored.score ? r : m), null);
+    const n = ruleRows.length;
+    const summary = [
+      vpnCell(`${n} rule${n === 1 ? '' : 's'}`),
+      vpnCell(`used by ${users.length} ${users.length === 1 ? 'identity' : 'identities'}`, 'dim'),
+      vpnCell('policies: ' + (policies.join(', ') || '—'), 'dim'),
+    ];
+    if (top) {
+      const risk = vpnCell(`highest risk: ${top.scored.score} (${top.scored.band.label})`);
+      risk.risk = true; // hidden by the risk toggle
+      summary.push(risk);
+    }
+    groups.push({
+      key: 'acl:' + aclName, title: aclName, summary,
+      sections: [
+        {
+          id: 'used-by', heading: 'Used by',
+          columns: [{ key: 'kind', label: 'Type' }, { key: 'name', label: 'Identity' }, { key: 'policy', label: 'VPN policy' }],
+          rows: users.map(i => ({ cells: { kind: i.kind, name: i.name, policy: vpnPolicyOf(config, i) } })),
+        },
+        { id: 'rules', heading: 'Rules', ruleRows },
+      ],
+    });
   }
-  return rows;
+  return groups;
 }
 
 function buildVpnInventory(config, options) {
@@ -379,8 +419,8 @@ function buildVpnInventory(config, options) {
     }),
   });
 
-  const filterRows = vpnFilterRuleRows(config, all);
-  if (filterRows.length) sections.push({ id: 'filter-rules', heading: 'VPN filter rules', ruleRows: filterRows });
+  const filterGroups = vpnFilterGroups(config, all);
+  if (filterGroups.length) sections.push({ id: 'filter-rules', heading: 'VPN filter rules', groupLabel: 'Filter ACL', groups: filterGroups });
 
   sections.push({
     id: 'findings', heading: 'Findings',

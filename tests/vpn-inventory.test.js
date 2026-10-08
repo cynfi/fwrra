@@ -106,27 +106,72 @@ module.exports = async () => {
   assert.ok(df.some(x => /tunnel-group T2\|vpn-filter ACL NOACL is not defined/.test(x)));
   assert.ok(df.some(x => /tunnel-group T2\|split tunneling enabled but split-tunnel ACL NOSPLIT is not defined/.test(x)));
 
-  // ---- filter rule rows (scored) ----
+  // ---- VPN filter rules: one expandable group per unique filter ACL ----
   const fr = sec('filter-rules');
-  assert.ok(fr && Array.isArray(fr.ruleRows), 'filter-rules section with ruleRows');
-  // ENG_FILTER (2 ACEs) + CONTR_FILTER (3 ACEs), one row per distinct ACE
-  assert.strictEqual(fr.ruleRows.length, 5);
-  assert.ok(fr.ruleRows.every(r => r.id >= 100000 && r.type === 'rule' && r.interface === 'vpn-filter'));
-  assert.strictEqual(new Set(fr.ruleRows.map(r => r.id)).size, 5, 'row ids unique');
-  const e1 = fr.ruleRows[0], e2 = fr.ruleRows[1];
-  assert.strictEqual(e1.aclName, 'ENG_FILTER');
-  assert.strictEqual(e1.ruleNumber, 1);
-  assert.deepStrictEqual(e1.usedBy, ['tunnel-group ENG', 'group-policy ENG_GP', 'user alice']);
-  assert.strictEqual(e1.scored.action, 'permit');
-  assert.strictEqual(typeof e1.scored.score, 'number');
-  assert.notStrictEqual(e1.scored.score, e2.scored.score, 'different ACEs score differently');
-  const contrRows = fr.ruleRows.filter(r => r.aclName === 'CONTR_FILTER');
-  assert.deepStrictEqual(contrRows[0].usedBy, ['tunnel-group CONTR', 'group-policy CONTR_GP']);
-  assert.strictEqual(contrRows[1].inactive, true);
-  assert.strictEqual(contrRows[2].scored.action, 'deny');
-  assert.strictEqual(contrRows[2].scored.score, 0);
-  assert.strictEqual(contrRows[2].scored.srcResolved.kind, 'any', 'deny rows must carry resolved endpoints');
-  assert.ok(contrRows[2].scored.services.length >= 1);
+  assert.ok(fr && Array.isArray(fr.groups) && !fr.ruleRows, 'filter-rules is a groups section');
+  assert.strictEqual(fr.groupLabel, 'Filter ACL');
+  assert.deepStrictEqual(fr.groups.map(g => g.title), ['ENG_FILTER', 'CONTR_FILTER']);
+  assert.strictEqual(new Set(fr.groups.map(g => g.key)).size, 2, 'group keys unique');
+  const fg = (t) => fr.groups.find(g => g.title === t);
+  const used = (g) => g.sections.find(s => s.id === 'used-by').rows
+    .map(r => `${ct(r.cells.kind)} ${ct(r.cells.name)} -> ${ct(r.cells.policy)}`);
+
+  const eg = fg('ENG_FILTER');
+  assert.deepStrictEqual(eg.sections.map(s => s.id), ['used-by', 'rules']);
+  assert.deepStrictEqual(used(eg),
+    ['tunnel-group ENG -> ENG_GP', 'group-policy ENG_GP -> ENG_GP', 'user alice -> CONTR_GP']);
+  const egSummary = eg.summary.map(ct).join(' | ');
+  assert.ok(egSummary.includes('2 rules'), egSummary);
+  assert.ok(egSummary.includes('policies: ENG_GP, CONTR_GP'), egSummary);
+  assert.ok(eg.summary.some(c => c.risk === true && /highest risk: \d+/.test(ct(c))), 'risk chip is flagged risk');
+  const er = eg.sections.find(s => s.id === 'rules').ruleRows;
+  assert.strictEqual(er.length, 2);
+  assert.ok(er.every(r => r.id >= 100000 && r.type === 'rule' && r.interface === 'vpn-filter' && r.aclName === 'ENG_FILTER'));
+  assert.deepStrictEqual(er[0].usedBy, ['tunnel-group ENG', 'group-policy ENG_GP', 'user alice']);
+  assert.strictEqual(er[0].ruleNumber, 1);
+  assert.strictEqual(er[0].scored.action, 'permit');
+  assert.strictEqual(typeof er[0].scored.score, 'number');
+  assert.notStrictEqual(er[0].scored.score, er[1].scored.score, 'different ACEs score differently');
+
+  const cg = fg('CONTR_FILTER');
+  assert.deepStrictEqual(used(cg), ['tunnel-group CONTR -> CONTR_GP', 'group-policy CONTR_GP -> CONTR_GP']);
+  const cr = cg.sections.find(s => s.id === 'rules').ruleRows;
+  assert.strictEqual(cr.length, 3);
+  assert.strictEqual(cr[1].inactive, true);
+  assert.strictEqual(cr[2].scored.action, 'deny');
+  assert.strictEqual(cr[2].scored.score, 0);
+  assert.strictEqual(cr[2].scored.srcResolved.kind, 'any', 'deny rows must carry resolved endpoints');
+  assert.ok(cr[2].scored.services.length >= 1);
+  const allIds = fr.groups.flatMap(g => g.sections.filter(s => s.ruleRows).flatMap(s => s.ruleRows.map(r => r.id)));
+  assert.strictEqual(new Set(allIds).size, allIds.length, 'rule row ids unique across groups');
+
+  // the SAME filter used by several policies -> ONE group listing every policy
+  const shared = [
+    'access-list SHARED extended permit ip 10.5.0.0 255.255.255.0 host 10.0.0.9',
+    'group-policy A internal',
+    'group-policy A attributes',
+    ' vpn-filter value SHARED',
+    'group-policy B internal',
+    'group-policy B attributes',
+    ' vpn-filter value SHARED',
+    'tunnel-group TA type remote-access',
+    'tunnel-group TA general-attributes',
+    ' default-group-policy A',
+    'tunnel-group TB type remote-access',
+    'tunnel-group TB general-attributes',
+    ' default-group-policy B',
+    '',
+  ].join('\n');
+  const sinv = plain(asa.buildInventory(asa.parse(shared), {}));
+  const sfr = sinv.sections.find(s => s.id === 'filter-rules');
+  assert.strictEqual(sfr.groups.length, 1, 'one group for one unique filter ACL');
+  const sg = sfr.groups[0];
+  assert.strictEqual(sg.title, 'SHARED');
+  const sSummary = sg.summary.map(ct).join(' | ');
+  assert.ok(sSummary.includes('policies: A, B'), sSummary);
+  const sUsed = sg.sections.find(s => s.id === 'used-by').rows.map(r => `${ct(r.cells.kind)} ${ct(r.cells.name)} -> ${ct(r.cells.policy)}`).sort();
+  assert.deepStrictEqual(sUsed, ['group-policy A -> A', 'group-policy B -> B', 'tunnel-group TA -> A', 'tunnel-group TB -> B']);
+  assert.strictEqual(sg.sections.find(s => s.id === 'rules').ruleRows.length, 1, 'rules listed once, not per policy');
 
   // ---- Final-review fixes ----
   // group-lock without vpn-group-policy: inherit the locked tunnel-group's default group-policy

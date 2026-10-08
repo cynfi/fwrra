@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Firewall Rule Risk Analyzer (FortiOS) v1.0.5</title>
+<title>Firewall Rule Risk Analyzer (FortiOS) v1.0.6</title>
 <style>
   @font-face { font-family: 'sys-mono'; src: local('JetBrains Mono'), local('SF Mono'), local('Consolas'); }
   :root {
@@ -278,6 +278,24 @@
     color: var(--text-dim); margin: 0 0 8px;
   }
   .inv-section .tag { color: var(--text-dim); font-size: 10.5px; margin-left: 6px; }
+  .grp-bar { display: flex; gap: 8px; margin-bottom: 10px; }
+  .grp { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); margin-bottom: 8px; overflow: hidden; }
+  .grp-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 9px 12px; cursor: pointer; }
+  .grp-head:hover { background: #1c2130; }
+  .grp.open > .grp-head { border-bottom: 1px solid var(--border-soft); background: #1a1f2c; }
+  .grp-toggle {
+    font-family: var(--mono); font-size: 14px; font-weight: 700; line-height: 1; width: 22px; height: 22px;
+    cursor: pointer; background: var(--panel-2); color: var(--text-bright);
+    border: 1px solid var(--border); border-radius: 4px; padding: 0;
+  }
+  .grp-title { font-family: var(--mono); font-size: 13px; font-weight: 700; color: var(--text-bright); }
+  .grp-chip { font-family: var(--mono); font-size: 11.5px; color: var(--text-dim); }
+  .grp-body { padding: 12px 14px 4px; }
+  .grp-sub {
+    font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--text-dim); margin: 4px 0 6px;
+  }
+  .grp-body .table-wrap { margin-bottom: 14px; }
   .tone-warn { color: var(--c-high); }
   .tone-dim { color: var(--text-dim); }
 
@@ -296,7 +314,7 @@
 <div class="app">
   <div class="header">
     <div>
-      <h1><span class="dot"></span>Firewall Rule Risk Analyzer (FortiOS) <span class="ver">v1.0.5</span></h1>
+      <h1><span class="dot"></span>Firewall Rule Risk Analyzer (FortiOS) <span class="ver">v1.0.6</span></h1>
       <div class="sub">rule exposure &amp; policy scoring &middot; runs entirely in your browser, nothing uploaded</div>
     </div>
     <div class="header-actions" id="headerActions" style="display:none;">
@@ -454,6 +472,8 @@ const SYSLOG_LEVEL_NAMES = {
 //         Inventory = { title, sections: Section[] }
 //         Section   = { id, heading, columns:[{key,label}], rows:[{cells, detail?}] }
 //                   | { id, heading, ruleRows: RuleRow[] }   (scored rule rows)
+//                   | { id, heading, groups: [{ key, title, summary: cell[], sections: Section[] }] }
+//                       (collapsible blocks, collapsed by default, +/- per block and expand/collapse all)
 //         cell = string | { text, tone?: 'warn'|'dim', note? }
 //         detail block = {kind:'kv'|'networks'|'list', title, ...}
 //         Return null when the config has nothing to show (no tab).
@@ -1854,6 +1874,7 @@ registerVendor({
   let INVENTORY = null;
   let activeTab = 'rules';
   let INV_EXPANDED = new Set();
+  let GROUP_OPEN = new Set();
 
   const dropzone = document.getElementById('dropzone');
   const fileInput = document.getElementById('fileInput');
@@ -1949,6 +1970,7 @@ registerVendor({
     ROWS = vendor.buildRuleset(CONFIG, { firewallRole: CURRENT_ROLE });
     INVENTORY = vendor.buildInventory ? vendor.buildInventory(CONFIG, { firewallRole: CURRENT_ROLE }) : null;
     INV_EXPANDED = new Set();
+    GROUP_OPEN = new Set();
     tabBar.style.display = INVENTORY ? '' : 'none';
     document.getElementById('inventoryTabBtn').textContent = INVENTORY ? INVENTORY.title : '';
     EXPANDED = new Set();
@@ -2583,6 +2605,60 @@ registerVendor({
     return wrap;
   }
 
+  // Policy blocks: one collapsible block per group (see shared/registry.js
+  // `groups` sections). Collapsed by default; a search forces matches open.
+  function groupMatches(g, q) {
+    if (!q) return true;
+    if ([g.title].concat(g.summary.map(cellText)).join(' ').toLowerCase().includes(q)) return true;
+    return g.sections.some(s => s.ruleRows
+      ? s.ruleRows.some(r => ruleRowMatchesQuery(r, q))
+      : s.rows.some(r => invRowMatches(r, q)));
+  }
+
+  function buildInvGroups(sec, q) {
+    const wrap = document.createElement('div');
+    const keys = sec.groups.map(g => sec.id + ':' + g.key);
+    const bar = document.createElement('div');
+    bar.className = 'grp-bar';
+    bar.innerHTML = '<button class="exc-btn" data-grp-all="open">+ Expand all</button> ' +
+      '<button class="exc-btn" data-grp-all="close">− Collapse all</button>';
+    bar.querySelector('[data-grp-all="open"]').addEventListener('click', () => { keys.forEach(k => GROUP_OPEN.add(k)); renderInventory(); });
+    bar.querySelector('[data-grp-all="close"]').addEventListener('click', () => { keys.forEach(k => GROUP_OPEN.delete(k)); renderInventory(); });
+    wrap.appendChild(bar);
+    for (const g of sec.groups) {
+      if (!groupMatches(g, q)) continue;
+      const key = sec.id + ':' + g.key;
+      const open = !!q || GROUP_OPEN.has(key);
+      const box = document.createElement('div');
+      box.className = 'grp' + (open ? ' open' : '');
+      const head = document.createElement('div');
+      head.className = 'grp-head';
+      head.innerHTML = `<button class="grp-toggle" aria-expanded="${open}">${open ? '−' : '+'}</button>` +
+        `<span class="grp-title">${escapeHtml(g.title)}</span>` +
+        g.summary.map(c => `<span class="grp-chip${c && c.risk ? ' risk-only' : ''}">${cellHtml(c)}</span>`).join('');
+      head.addEventListener('click', () => {
+        if (GROUP_OPEN.has(key)) GROUP_OPEN.delete(key); else GROUP_OPEN.add(key);
+        renderInventory();
+      });
+      box.appendChild(head);
+      if (open) {
+        const body = document.createElement('div');
+        body.className = 'grp-body';
+        for (const s of g.sections) {
+          const sub = Object.assign({}, s, { id: key + ':' + s.id }); // unique expand keys per policy
+          const h = document.createElement('h4');
+          h.className = 'grp-sub';
+          h.textContent = s.heading;
+          body.appendChild(h);
+          body.appendChild(s.ruleRows ? buildInvRuleTable(sub, q) : buildInvTable(sub, q));
+        }
+        box.appendChild(body);
+      }
+      wrap.appendChild(box);
+    }
+    return wrap;
+  }
+
   function renderInventory() {
     if (!INVENTORY) { invBody.innerHTML = ''; return; }
     const q = invSearch.value.trim().toLowerCase();
@@ -2593,7 +2669,7 @@ registerVendor({
       const h = document.createElement('h3');
       h.textContent = sec.heading;
       box.appendChild(h);
-      box.appendChild(sec.ruleRows ? buildInvRuleTable(sec, q) : buildInvTable(sec, q));
+      box.appendChild(sec.groups ? buildInvGroups(sec, q) : sec.ruleRows ? buildInvRuleTable(sec, q) : buildInvTable(sec, q));
       invBody.appendChild(box);
     }
   }
@@ -2638,29 +2714,41 @@ registerVendor({
   function exportInventoryCsv() {
     const q = invSearch.value.trim().toLowerCase();
     const out = [];
-    for (const sec of INVENTORY.sections) {
-      out.push(csvEscape('# ' + sec.heading));
-      if (sec.ruleRows) {
-        out.push(['ACL', 'Rule #', ...(riskOn ? ['Score', 'Band'] : []), 'Action', 'Inactive', 'Protocol',
+    // Emit one section as a CSV block; `policy` (optional) becomes a first column.
+    const emit = (heading, s, policy, label) => {
+      out.push(csvEscape('# ' + heading));
+      const pre = policy === undefined ? [] : [policy];
+      const preH = policy === undefined ? [] : [label || 'Group'];
+      if (s.ruleRows) {
+        out.push([...preH, 'ACL', 'Rule #', ...(riskOn ? ['Score', 'Band'] : []), 'Action', 'Inactive', 'Protocol',
           'Source', 'Destination', 'Service', 'Logging', 'Used by'].join(','));
-        for (const row of sec.ruleRows.filter(r => ruleRowMatchesQuery(r, q))) {
-          const s = row.scored;
-          out.push([row.aclName, row.ruleNumber, ...(riskOn ? [s.score, s.band.label] : []), s.action,
-            row.inactive ? 'yes' : 'no', (s.services[0] && s.services[0].protocol) || 'ip',
-            endpointText(s.srcResolved), endpointText(s.dstResolved), serviceText(s.services),
-            s.logging.label, (row.usedBy || []).join('; ')].map(csvEscape).join(','));
+        for (const row of s.ruleRows.filter(r => ruleRowMatchesQuery(r, q))) {
+          const sc = row.scored;
+          out.push([...pre, row.aclName, row.ruleNumber, ...(riskOn ? [sc.score, sc.band.label] : []), sc.action,
+            row.inactive ? 'yes' : 'no', (sc.services[0] && sc.services[0].protocol) || 'ip',
+            endpointText(sc.srcResolved), endpointText(sc.dstResolved), serviceText(sc.services),
+            sc.logging.label, (row.usedBy || []).join('; ')].map(csvEscape).join(','));
         }
       } else {
-        out.push(sec.columns.map(c => csvEscape(c.label)).join(','));
-        for (const row of sec.rows.filter(r => invRowMatches(r, q))) {
-          out.push(sec.columns.map(c => {
+        out.push([...preH, ...s.columns.map(c => c.label)].map(csvEscape).join(','));
+        for (const row of s.rows.filter(r => invRowMatches(r, q))) {
+          out.push([...pre, ...s.columns.map(c => {
             const v = row.cells[c.key];
             const n = v && typeof v === 'object' && v.note ? ` (${v.note})` : '';
-            return csvEscape(cellText(v) + n);
-          }).join(','));
+            return cellText(v) + n;
+          })].map(csvEscape).join(','));
         }
       }
       out.push('');
+    };
+    for (const sec of INVENTORY.sections) {
+      if (sec.groups) {
+        for (const g of sec.groups.filter(x => groupMatches(x, q))) {
+          for (const s of g.sections) emit(`${g.title} / ${s.heading}`, s, g.title, sec.groupLabel);
+        }
+      } else {
+        emit(sec.heading, sec);
+      }
     }
     downloadCsv(out.join('\n'), 'asa-vpn-inventory.csv');
   }

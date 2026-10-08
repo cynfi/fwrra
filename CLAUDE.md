@@ -421,6 +421,12 @@ with them unless a vendor's model genuinely doesn't fit:
   Split tunneling is shown as factual Enabled/Disabled (`tunnelall` = Disabled;
   `tunnelspecified` = Enabled include; `excludespecified` = Enabled exclude;
   unset everywhere = Disabled/default) and is never hidden by the risk toggle.
+  The "VPN filter rules" section is a `groups` section (see `shared/registry.js`):
+  one collapsed, expandable group per UNIQUE filter ACL (`+`/`-` per group plus
+  Expand all / Collapse all), each listing every identity using it with the
+  policy it lands in, plus its scored rules once - however many policies share
+  the ACL. Score-dependent summary chips carry `risk: true` and are hidden by the
+  risk toggle.
   RADIUS/LDAP-supplied attributes are not visible in the config; the findings
   section says so.
 - **Version.** `VERSION` in `build.js` is stamped into every build's `<title>`
