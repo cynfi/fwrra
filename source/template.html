@@ -263,6 +263,24 @@
     margin-top: 22px; font-size: 11.5px; color: #4b5160; font-family: var(--mono); line-height: 1.7;
   }
 
+  /* ---- Tabs + inventory view ---- */
+  .tabs { display: flex; gap: 4px; margin-bottom: 14px; border-bottom: 1px solid var(--border); }
+  .tab-btn {
+    font-family: var(--mono); font-size: 12.5px; cursor: pointer; background: transparent;
+    color: var(--text-dim); border: 1px solid transparent; border-bottom: none;
+    border-radius: 6px 6px 0 0; padding: 7px 14px;
+  }
+  .tab-btn:hover { color: var(--text); }
+  .tab-btn.active { color: var(--text-bright); background: var(--panel); border-color: var(--border); }
+  .inv-section { margin-bottom: 22px; }
+  .inv-section h3 {
+    font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--text-dim); margin: 0 0 8px;
+  }
+  .inv-section .tag { color: var(--text-dim); font-size: 10.5px; margin-left: 6px; }
+  .tone-warn { color: var(--c-high); }
+  .tone-dim { color: var(--text-dim); }
+
   /* ---- Risk analysis off: hide everything that depends on scoring ---- */
   body.no-risk .risk-only { display: none !important; }
   body.no-risk .summary { grid-template-columns: repeat(3, 1fr); }
@@ -282,6 +300,10 @@
       <div class="sub">rule exposure &amp; policy scoring &middot; runs entirely in your browser, nothing uploaded</div>
     </div>
     <div class="header-actions" id="headerActions" style="display:none;">
+      <label class="toggle-label" for="riskToggle" title="Turn off to hide all risk scoring, policy verdicts and score-based filters/columns (e.g. for audit screenshots of the rules).">
+        <input type="checkbox" id="riskToggle" checked>
+        <span>Risk analysis</span>
+      </label>
       <button id="loadNewBtn">Load different config</button>
       <button id="exportBtn">Export CSV</button>
     </div>
@@ -306,12 +328,13 @@
         <div class="file-sub" id="fileInfoSub"></div>
       </div>
     </div>
+    <div class="tabs" id="tabBar" style="display:none;">
+      <button class="tab-btn active" data-tab="rules">Rules</button>
+      <button class="tab-btn" data-tab="inventory" id="inventoryTabBtn"></button>
+    </div>
+    <div id="rulesView">
     <div class="summary" id="summary"></div>
     <div class="controls">
-      <label class="toggle-label" for="riskToggle" title="Turn off to hide all risk scoring, policy verdicts and score-based filters/columns (e.g. for audit screenshots of the rules).">
-        <input type="checkbox" id="riskToggle" checked>
-        <span>Risk analysis</span>
-      </label>
       <label class="toggle-label risk-only" for="roleSelect" title="Firewall role changes scoring: Internet-facing treats broad/any outbound as the expected baseline (outbound-to-internet is the box's job); Internal segmentation penalizes broad outbound since data isn't meant to leave a zone. Auto-detected from routing — override here.">
         <span>Role</span>
         <select id="roleSelect">
@@ -384,6 +407,13 @@
       </table>
     </div>
     <footer class="note" id="footerNote"></footer>
+    </div>
+    <div id="inventoryView" style="display:none;">
+      <div class="controls">
+        <input type="text" id="invSearch" placeholder="filter by name, ACL, pool, network...">
+      </div>
+      <div id="invBody"></div>
+    </div>
   </div>
 </div>
 

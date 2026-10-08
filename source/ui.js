@@ -8,6 +8,9 @@
   let sortDir = 'asc';
   let showInactive = false;
   let riskOn = true;
+  let INVENTORY = null;
+  let activeTab = 'rules';
+  let INV_EXPANDED = new Set();
 
   const dropzone = document.getElementById('dropzone');
   const fileInput = document.getElementById('fileInput');
@@ -27,6 +30,11 @@
   const roleSelect = document.getElementById('roleSelect');
   const filterPolicy = document.getElementById('filterPolicy');
   const riskToggle = document.getElementById('riskToggle');
+  const tabBar = document.getElementById('tabBar');
+  const rulesView = document.getElementById('rulesView');
+  const inventoryView = document.getElementById('inventoryView');
+  const invBody = document.getElementById('invBody');
+  const invSearch = document.getElementById('invSearch');
   const searchBox = document.getElementById('searchBox');
   const footerNote = document.getElementById('footerNote');
   const fileInfoName = document.getElementById('fileInfoName');
@@ -96,6 +104,10 @@
     CURRENT_ROLE = vendor.detectRole ? vendor.detectRole(CONFIG) : 'internet-facing';
     if (roleSelect) roleSelect.value = CURRENT_ROLE;
     ROWS = vendor.buildRuleset(CONFIG, { firewallRole: CURRENT_ROLE });
+    INVENTORY = vendor.buildInventory ? vendor.buildInventory(CONFIG, { firewallRole: CURRENT_ROLE }) : null;
+    INV_EXPANDED = new Set();
+    tabBar.style.display = INVENTORY ? '' : 'none';
+    document.getElementById('inventoryTabBtn').textContent = INVENTORY ? INVENTORY.title : '';
     EXPANDED = new Set();
     sortKey = 'default';
     sortDir = 'asc';
@@ -106,6 +118,7 @@
     renderSummary();
     markSortedHeader();
     renderTable();
+    setTab('rules');
   }
 
   // ---- summary strip ----
@@ -205,6 +218,7 @@
         markSortedHeader();
       }
       renderTable();
+      if (INVENTORY) renderInventory();
     });
   }
   searchBox.addEventListener('input', debounce(renderTable, 150));
@@ -598,6 +612,147 @@
   function escapeHtml(str) {
     if (str === null || str === undefined) return '';
     return String(str).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  // ---- tabs + vendor inventory (generic; see shared/registry.js) ----
+  tabBar.querySelectorAll('.tab-btn').forEach(b => b.addEventListener('click', () => setTab(b.dataset.tab)));
+  if (invSearch) invSearch.addEventListener('input', debounce(renderInventory, 150));
+
+  function setTab(tab) {
+    activeTab = tab;
+    rulesView.style.display = tab === 'rules' ? '' : 'none';
+    inventoryView.style.display = tab === 'inventory' ? '' : 'none';
+    tabBar.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+    if (tab === 'inventory') renderInventory();
+  }
+
+  function cellText(c) { return c && typeof c === 'object' ? c.text : (c ?? ''); }
+  function cellHtml(c) {
+    if (c && typeof c === 'object') {
+      return `<span class="${c.tone ? 'tone-' + c.tone : ''}">${escapeHtml(c.text)}</span>` +
+        (c.note ? `<span class="tag">${escapeHtml(c.note)}</span>` : '');
+    }
+    return escapeHtml(c);
+  }
+
+  function invRowMatches(row, q) {
+    if (!q) return true;
+    return Object.values(row.cells).map(cellText).join(' ').toLowerCase().includes(q);
+  }
+
+  function ruleRowMatchesQuery(row, q) {
+    if (!q) return true;
+    const s = row.scored;
+    return [endpointText(s.srcResolved), endpointText(s.dstResolved), serviceText(s.services),
+      row.aclName || '', (row.usedBy || []).join(' ')].join(' ').toLowerCase().includes(q);
+  }
+
+  function detailHtml(blocks) {
+    const sec = (title, inner) => `<div class="detail-section" style="margin-bottom:12px;"><h4>${escapeHtml(title)}</h4>${inner}</div>`;
+    return (blocks || []).map(b => {
+      if (b.kind === 'kv') {
+        return sec(b.title, '<div class="score-explain">' + b.pairs.map(([k, v]) =>
+          `<div class="row"><span class="k">${escapeHtml(k)}</span><span>${cellHtml(v)}</span></div>`).join('') + '</div>');
+      }
+      if (b.kind === 'networks') {
+        return sec(b.title, '<div class="member-tree"><ul>' + b.entries.map(e =>
+          `<li><span class="tag">${escapeHtml(e.action)}</span> ${renderMemberTree(e.resolved)}</li>`).join('') + '</ul></div>');
+      }
+      if (b.kind === 'list') {
+        return sec(b.title, '<div class="member-tree"><ul>' + b.items.map(x => `<li>${escapeHtml(x)}</li>`).join('') + '</ul></div>');
+      }
+      return '';
+    }).join('');
+  }
+
+  function buildInvTable(sec, q) {
+    const wrap = document.createElement('div');
+    wrap.className = 'table-wrap';
+    const table = document.createElement('table');
+    table.innerHTML = '<thead><tr><th style="width:20px;"></th>' +
+      sec.columns.map(c => `<th>${escapeHtml(c.label)}</th>`).join('') + '</tr></thead>';
+    const tb = document.createElement('tbody');
+    const rows = sec.rows.filter(r => invRowMatches(r, q));
+    if (!rows.length) {
+      tb.innerHTML = `<tr><td colspan="${sec.columns.length + 1}"><div class="empty-state">No matching entries.</div></td></tr>`;
+    }
+    for (const row of rows) {
+      const key = sec.id + ':' + sec.rows.indexOf(row);
+      const open = !!row.detail && INV_EXPANDED.has(key);
+      const tr = document.createElement('tr');
+      tr.className = 'rule-row' + (open ? ' expanded' : '');
+      tr.innerHTML = `<td><span class="expand-caret ${open ? 'open' : ''}">${row.detail ? '▸' : ''}</span></td>` +
+        sec.columns.map(c => `<td class="mono">${cellHtml(row.cells[c.key])}</td>`).join('');
+      if (row.detail) {
+        tr.addEventListener('click', () => {
+          if (INV_EXPANDED.has(key)) INV_EXPANDED.delete(key); else INV_EXPANDED.add(key);
+          renderInventory();
+        });
+      }
+      tb.appendChild(tr);
+      if (open) {
+        const dr = document.createElement('tr');
+        dr.className = 'detail-row';
+        const td = document.createElement('td');
+        td.colSpan = sec.columns.length + 1;
+        td.innerHTML = '<div class="detail-panel">' + detailHtml(row.detail) + '</div>';
+        dr.appendChild(td);
+        tb.appendChild(dr);
+      }
+    }
+    table.appendChild(tb);
+    wrap.appendChild(table);
+    return wrap;
+  }
+
+  // Scored rule rows reuse the main table's row/detail builders (and therefore
+  // the risk toggle); only the click handler is swapped so it re-renders here.
+  function buildInvRuleTable(sec, q) {
+    const wrap = document.createElement('div');
+    wrap.className = 'table-wrap';
+    const table = document.createElement('table');
+    const thead = document.querySelector('#ruleTable thead').cloneNode(true);
+    thead.querySelectorAll('th').forEach(th => th.removeAttribute('data-sort'));
+    thead.querySelector('tr').insertAdjacentHTML('beforeend', '<th>Used by</th>');
+    table.appendChild(thead);
+    const tb = document.createElement('tbody');
+    const rows = sec.ruleRows.filter(r => ruleRowMatchesQuery(r, q));
+    if (!rows.length) tb.innerHTML = '<tr><td colspan="12"><div class="empty-state">No matching entries.</div></td></tr>';
+    for (const row of rows) {
+      const tr = buildRuleRow(row).cloneNode(true); // cloneNode drops the rules-table click handler
+      const used = document.createElement('td');
+      used.className = 'mono';
+      used.textContent = (row.usedBy || []).join(', ');
+      tr.appendChild(used);
+      tr.addEventListener('click', () => {
+        if (EXPANDED.has(row.id)) EXPANDED.delete(row.id); else EXPANDED.add(row.id);
+        renderInventory();
+      });
+      tb.appendChild(tr);
+      if (EXPANDED.has(row.id)) {
+        const dr = buildDetailRow(row);
+        dr.firstChild.colSpan = 12;
+        tb.appendChild(dr);
+      }
+    }
+    table.appendChild(tb);
+    wrap.appendChild(table);
+    return wrap;
+  }
+
+  function renderInventory() {
+    if (!INVENTORY) { invBody.innerHTML = ''; return; }
+    const q = invSearch.value.trim().toLowerCase();
+    invBody.innerHTML = '';
+    for (const sec of INVENTORY.sections) {
+      const box = document.createElement('div');
+      box.className = 'inv-section';
+      const h = document.createElement('h3');
+      h.textContent = sec.heading;
+      box.appendChild(h);
+      box.appendChild(sec.ruleRows ? buildInvRuleTable(sec, q) : buildInvTable(sec, q));
+      invBody.appendChild(box);
+    }
   }
 
   // ---- CSV export ----
