@@ -1,6 +1,7 @@
 # ASA remote-access VPN (AnyConnect) enumeration — design
 
-Status: approved in conversation 2026-10-08; spec awaiting review.
+Status: approved in conversation 2026-10-08; spec awaiting review. Revised
+2026-10-08: explicit split-tunnel Enabled/Disabled state added (section 2).
 
 ## Goal
 For Cisco ASA, enumerate remote-access VPN access for audit evidence: which
@@ -48,7 +49,7 @@ New `buildVpnInventory(config, options)` (options carries `firewallRole`).
   `address-pool` (ASA behaviour); a user `framedIp` overrides both.
 - One **identity row** per tunnel-group, per group-policy referenced by one,
   and per user override. Each shows: pools (with address count), protocols,
-  split-tunnel mode + network list, vpn-filter ACL, simultaneous logins.
+  split tunneling Enabled/Disabled + mode + network list, vpn-filter ACL, simultaneous logins.
 - **vpn-filter ACEs** are resolved through the existing object/group resolver and
   scored with the existing `scoreEntry(config, entry, direction)`. Direction is
   `'internal'` (symmetric src/dst blend): VPN clients are authenticated and the
@@ -61,8 +62,19 @@ New `buildVpnInventory(config, options)` (options carries `firewallRole`).
   VPN filter: tunnel user reaches whatever the pool routes to / sysopt
   permit-vpn allows"), not a silent blank. `sysopt connection permit-vpn`
   present is shown as a global finding.
+- **Split tunneling state** is shown explicitly per group-policy, tunnel-group
+  and user as `Enabled` or `Disabled`, derived from the effective
+  `split-tunnel-policy` (with its `source`, per the inheritance rule above):
+  `tunnelall` = **Disabled** (full tunnel); `tunnelspecified` = **Enabled
+  (include)** (only listed networks tunneled; the rest goes direct);
+  `excludespecified` = **Enabled (exclude)** (listed networks go direct; the
+  rest tunneled). Unset everywhere = inherited from `DfltGrpPolicy`, which
+  defaults to `tunnelall` -> Disabled (source shown as `default`). Enabled with
+  a missing or empty `split-tunnel-network-list` is flagged as a misconfiguration
+  finding. Enabled/Disabled is a factual state, not scored, and is not gated by
+  the risk toggle.
 - **Split-tunnel ACLs** are informational: networks tunneled/excluded, expandable,
-  never scored. `tunnelall` shown as such.
+  never scored.
 - Disabled/inactive ACEs are tagged, not dropped (matches the existing rule).
 - Findings are factual (config states), not scored, and not gated by the toggle;
   only the per-ACE score/band/breakdown and risk-based filters are.
@@ -100,7 +112,9 @@ excludespecified); a user override with a different filter; a group-policy with
 `sysopt connection permit-vpn`; an inactive ACE. Assert: inheritance sources,
 pool counts, filter ACE scores equal `scoreEntry` direct output, toggle hides
 all score cells in the VPN tab, VPN CSV columns with the toggle on and off, and
-that FortiOS/PAN-OS/combined builds still pass the prior toggle test (no tab on
+split-tunnel state for each of tunnelall (Disabled), tunnelspecified and
+excludespecified (Enabled), inherited-default (Disabled, source `default`), and
+Enabled-with-no-list (flagged); that FortiOS/PAN-OS/combined builds still pass the prior toggle test (no tab on
 non-ASA configs). Also confirm the main rule table is unchanged for the ASA
 sample.
 
